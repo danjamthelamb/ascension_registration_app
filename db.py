@@ -2,18 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import secrets
-import sqlite3
-from datetime import date, datetime, timedelta, timezone
-from pathlib import Path
+from datetime import datetime, timedelta, timezone
 
-
-# ---------------------------------------------------------
-# Database setup
-# ---------------------------------------------------------
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-DATA_DIR = PROJECT_ROOT / "data"
-DB_PATH = DATA_DIR / "registration.sqlite"
+import psycopg
+from psycopg.rows import dict_row
+import streamlit as st
 
 
 # ---------------------------------------------------------
@@ -29,66 +22,23 @@ VERIFICATION_MAX_ATTEMPTS = 5
 # Database connection
 # ---------------------------------------------------------
 
-def _connect() -> sqlite3.Connection:
+def _connect() -> psycopg.Connection:
     """
-    Open a connection to the registration database.
-    """
+    Open a connection to the PostgreSQL database.
 
-    DATA_DIR.mkdir(exist_ok=True)
+    The connection URL is stored in:
+        .streamlit/secrets.toml
 
-    conn = sqlite3.connect(DB_PATH)
-
-    # SQLite does not enforce foreign keys unless enabled.
-    conn.execute("PRAGMA foreign_keys = ON;")
-
-    return conn
-
-
-# ---------------------------------------------------------
-# Database migration helpers
-# ---------------------------------------------------------
-
-def _column_exists(
-    conn: sqlite3.Connection,
-    table_name: str,
-    column_name: str,
-) -> bool:
-    """
-    Return True if a column already exists in a table.
+    [database]
+    url = "postgresql://..."
     """
 
-    columns = conn.execute(
-        f"PRAGMA table_info({table_name});"
-    ).fetchall()
+    database_url = st.secrets["database"]["url"]
 
-    return any(
-        column[1] == column_name
-        for column in columns
+    return psycopg.connect(
+        database_url,
+        row_factory=dict_row,
     )
-
-
-def _add_column_if_missing(
-    conn: sqlite3.Connection,
-    table_name: str,
-    column_name: str,
-    column_definition: str,
-) -> None:
-    """
-    Add a column to an existing SQLite table
-    only if the column is not already present.
-    """
-
-    if not _column_exists(
-        conn,
-        table_name,
-        column_name,
-    ):
-        conn.execute(
-            f"""
-            ALTER TABLE {table_name}
-            ADD COLUMN {column_name} {column_definition};
-            """
-        )
 
 
 # ---------------------------------------------------------
@@ -97,11 +47,10 @@ def _add_column_if_missing(
 
 def init_db() -> None:
     """
-    Create the application's database tables if they
-    do not already exist.
+    Create all application tables, indexes, and
+    standard roster groups if they do not already exist.
 
-    Also performs simple migrations for new columns
-    added during development.
+    Safe to run every time the app starts.
     """
 
     with _connect() as conn:
@@ -113,7 +62,8 @@ def init_db() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS households (
-                household_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                household_id BIGSERIAL PRIMARY KEY,
+
                 household_reference TEXT NOT NULL UNIQUE,
 
                 parent_a_first_name TEXT NOT NULL,
@@ -132,7 +82,8 @@ def init_db() -> None:
                 state TEXT NOT NULL,
                 zip_code TEXT NOT NULL,
 
-                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMPTZ NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP
             );
             """
         )
@@ -144,27 +95,31 @@ def init_db() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS children (
-                child_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                household_id INTEGER NOT NULL,
+                child_id BIGSERIAL PRIMARY KEY,
+
+                household_id BIGINT NOT NULL,
 
                 first_name TEXT NOT NULL,
                 middle_name TEXT,
                 last_name TEXT NOT NULL,
-                date_of_birth TEXT NOT NULL,
+
+                date_of_birth DATE NOT NULL,
+
                 grade TEXT NOT NULL,
                 school TEXT NOT NULL,
 
                 receiving_first_communion_reconciliation
-                    INTEGER NOT NULL DEFAULT 0,
+                    BOOLEAN NOT NULL DEFAULT FALSE,
 
                 receiving_confirmation
-                    INTEGER NOT NULL DEFAULT 0,
+                    BOOLEAN NOT NULL DEFAULT FALSE,
 
                 baptism_status TEXT,
                 first_reconciliation_status TEXT,
                 first_communion_status TEXT,
 
-                FOREIGN KEY (household_id)
+                CONSTRAINT fk_children_household
+                    FOREIGN KEY (household_id)
                     REFERENCES households (household_id)
                     ON DELETE CASCADE
             );
@@ -172,47 +127,55 @@ def init_db() -> None:
         )
 
         # -------------------------------------------------
-        # Migrate existing children table
+        # Simple migrations
         # -------------------------------------------------
 
-        _add_column_if_missing(
-            conn,
-            "children",
-            "receiving_first_communion_reconciliation",
-            "INTEGER NOT NULL DEFAULT 0",
-        )
-
-        _add_column_if_missing(
-            conn,
-            "children",
-            "receiving_confirmation",
-            "INTEGER NOT NULL DEFAULT 0",
-        )
-
-        _add_column_if_missing(
-            conn,
-            "children",
-            "baptism_status",
-            "TEXT",
-        )
-
-        _add_column_if_missing(
-            conn,
-            "children",
-            "first_reconciliation_status",
-            "TEXT",
-        )
-
-        _add_column_if_missing(
-            conn,
-            "children",
-            "first_communion_status",
-            "TEXT",
+        conn.execute(
+            """
+            ALTER TABLE children
+            ADD COLUMN IF NOT EXISTS
+                receiving_first_communion_reconciliation
+                BOOLEAN NOT NULL DEFAULT FALSE;
+            """
         )
 
         conn.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_children_household_id
+            ALTER TABLE children
+            ADD COLUMN IF NOT EXISTS
+                receiving_confirmation
+                BOOLEAN NOT NULL DEFAULT FALSE;
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE children
+            ADD COLUMN IF NOT EXISTS
+                baptism_status TEXT;
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE children
+            ADD COLUMN IF NOT EXISTS
+                first_reconciliation_status TEXT;
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE children
+            ADD COLUMN IF NOT EXISTS
+                first_communion_status TEXT;
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_children_household_id
             ON children (household_id);
             """
         )
@@ -224,8 +187,9 @@ def init_db() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS verification_codes (
-                verification_id INTEGER PRIMARY KEY AUTOINCREMENT,
-                household_id INTEGER NOT NULL,
+                verification_id BIGSERIAL PRIMARY KEY,
+
+                household_id BIGINT NOT NULL,
 
                 code_hash TEXT NOT NULL,
                 salt TEXT NOT NULL,
@@ -233,11 +197,12 @@ def init_db() -> None:
                 attempt_count INTEGER NOT NULL DEFAULT 0,
                 max_attempts INTEGER NOT NULL DEFAULT 5,
 
-                created_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                used_at TEXT,
+                created_at TIMESTAMPTZ NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                used_at TIMESTAMPTZ,
 
-                FOREIGN KEY (household_id)
+                CONSTRAINT fk_verification_household
+                    FOREIGN KEY (household_id)
                     REFERENCES households (household_id)
                     ON DELETE CASCADE
             );
@@ -246,7 +211,8 @@ def init_db() -> None:
 
         conn.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_verification_household_id
+            CREATE INDEX IF NOT EXISTS
+                idx_verification_household_id
             ON verification_codes (household_id);
             """
         )
@@ -258,7 +224,7 @@ def init_db() -> None:
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS admin_verification_codes (
-                verification_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                verification_id BIGSERIAL PRIMARY KEY,
 
                 email TEXT NOT NULL,
 
@@ -268,16 +234,17 @@ def init_db() -> None:
                 attempt_count INTEGER NOT NULL DEFAULT 0,
                 max_attempts INTEGER NOT NULL DEFAULT 5,
 
-                created_at TEXT NOT NULL,
-                expires_at TEXT NOT NULL,
-                used_at TEXT
+                created_at TIMESTAMPTZ NOT NULL,
+                expires_at TIMESTAMPTZ NOT NULL,
+                used_at TIMESTAMPTZ
             );
             """
         )
 
         conn.execute(
             """
-            CREATE INDEX IF NOT EXISTS idx_admin_verification_email
+            CREATE INDEX IF NOT EXISTS
+                idx_admin_verification_email
             ON admin_verification_codes (email);
             """
         )
@@ -299,11 +266,6 @@ def init_db() -> None:
 
         # -------------------------------------------------
         # Seed standard roster groups
-        # -------------------------------------------------
-        #
-        # INSERT OR IGNORE means this runs safely every time
-        # the app starts without overwriting catechist names
-        # that an administrator has already entered.
         # -------------------------------------------------
 
         roster_groups = [
@@ -349,18 +311,22 @@ def init_db() -> None:
             ),
         ]
 
-        conn.executemany(
-            """
-            INSERT OR IGNORE INTO roster_groups (
-                group_key,
-                display_name,
-                category,
-                catechists
+        with conn.cursor() as cursor:
+
+            cursor.executemany(
+                """
+                INSERT INTO roster_groups (
+                    group_key,
+                    display_name,
+                    category,
+                    catechists
+                )
+                VALUES (%s, %s, %s, '')
+                ON CONFLICT (group_key)
+                DO NOTHING;
+                """,
+                roster_groups,
             )
-            VALUES (?, ?, ?, '');
-            """,
-            roster_groups,
-        )
 
 
 # ---------------------------------------------------------
@@ -369,24 +335,30 @@ def init_db() -> None:
 
 def _generate_household_reference() -> str:
     """
-    Generate a human-friendly public household reference.
+    Generate a human-friendly public Household ID.
 
     Example:
         ASC-K7M4P9
     """
 
-    # Avoid ambiguous characters:
+    # Avoid:
     # I, O, 0, 1
-    characters = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    characters = (
+        "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+    )
 
     while True:
 
         code = "".join(
-            secrets.choice(characters)
+            secrets.choice(
+                characters
+            )
             for _ in range(6)
         )
 
-        household_reference = f"ASC-{code}"
+        household_reference = (
+            f"ASC-{code}"
+        )
 
         with _connect() as conn:
 
@@ -394,12 +366,15 @@ def _generate_household_reference() -> str:
                 """
                 SELECT 1
                 FROM households
-                WHERE household_reference = ?;
+                WHERE household_reference = %s;
                 """,
-                (household_reference,),
+                (
+                    household_reference,
+                ),
             ).fetchone()
 
         if existing is None:
+
             return household_reference
 
 
@@ -412,28 +387,39 @@ def _hash_verification_code(
     salt: str,
 ) -> str:
     """
-    Hash a verification code with a unique salt.
+    Hash a verification code using a unique salt.
 
-    The plaintext verification code is never stored
-    in the database.
+    Plaintext verification codes are never
+    stored in the database.
     """
 
-    value = f"{salt}:{code}".encode("utf-8")
+    value = (
+        f"{salt}:{code}"
+        .encode(
+            "utf-8"
+        )
+    )
 
-    return hashlib.sha256(value).hexdigest()
+    return hashlib.sha256(
+        value
+    ).hexdigest()
 
 
 def _generate_verification_code() -> str:
     """
-    Generate a zero-padded numeric verification code.
+    Generate a zero-padded 6-digit verification code.
 
     Example:
         042817
     """
 
-    upper_limit = 10 ** VERIFICATION_CODE_DIGITS
+    upper_limit = (
+        10 ** VERIFICATION_CODE_DIGITS
+    )
 
-    number = secrets.randbelow(upper_limit)
+    number = secrets.randbelow(
+        upper_limit
+    )
 
     return str(number).zfill(
         VERIFICATION_CODE_DIGITS
@@ -450,17 +436,19 @@ def get_household_references_by_email(
     """
     Find household references associated with an email.
 
-    Searches both Parent / Guardian A and
-    Parent / Guardian B.
+    Searches both Parent / Guardian A and B.
 
     Matching is case-insensitive.
-
-    Returns an empty list if no matching household exists.
     """
 
-    email = email.strip().lower()
+    email = (
+        email
+        .strip()
+        .lower()
+    )
 
     if not email:
+
         return []
 
     with _connect() as conn:
@@ -469,8 +457,8 @@ def get_household_references_by_email(
             """
             SELECT household_reference
             FROM households
-            WHERE LOWER(TRIM(parent_a_email)) = ?
-               OR LOWER(TRIM(parent_b_email)) = ?
+            WHERE LOWER(TRIM(parent_a_email)) = %s
+               OR LOWER(TRIM(parent_b_email)) = %s
             ORDER BY household_id;
             """,
             (
@@ -480,23 +468,28 @@ def get_household_references_by_email(
         ).fetchall()
 
     return [
-        row[0]
+        row[
+            "household_reference"
+        ]
         for row in rows
     ]
 
 
 # ---------------------------------------------------------
-# Create household verification code
+# Create household verification
 # ---------------------------------------------------------
 
 def create_household_verification(
     household_reference: str,
 ) -> dict | None:
     """
-    Create a new verification code for an existing household.
+    Create a new email verification code for
+    an existing household.
 
-    The plaintext code is returned so the application
-    can email it, but it is NOT stored in SQLite.
+    The plaintext code is returned to the app once
+    so it can be emailed.
+
+    Only the salted hash is stored.
     """
 
     household_reference = (
@@ -514,49 +507,63 @@ def create_household_verification(
                 household_reference,
                 parent_a_email
             FROM households
-            WHERE household_reference = ?;
+            WHERE household_reference = %s;
             """,
-            (household_reference,),
+            (
+                household_reference,
+            ),
         ).fetchone()
 
         if household is None:
+
             return None
 
-        household_id = household[0]
-        stored_reference = household[1]
-        email = household[2]
+        household_id = household[
+            "household_id"
+        ]
 
-        code = _generate_verification_code()
+        email = household[
+            "parent_a_email"
+        ]
 
-        salt = secrets.token_hex(16)
-
-        code_hash = _hash_verification_code(
-            code,
-            salt,
+        code = (
+            _generate_verification_code()
         )
 
-        now = datetime.now(timezone.utc)
+        salt = secrets.token_hex(
+            16
+        )
+
+        code_hash = (
+            _hash_verification_code(
+                code,
+                salt,
+            )
+        )
+
+        now = datetime.now(
+            timezone.utc
+        )
 
         expires_at = (
             now
             + timedelta(
-                minutes=VERIFICATION_CODE_TTL_MINUTES
+                minutes=(
+                    VERIFICATION_CODE_TTL_MINUTES
+                )
             )
         )
-
-        now_text = now.isoformat()
-        expires_text = expires_at.isoformat()
 
         # Invalidate previous unused codes.
         conn.execute(
             """
             UPDATE verification_codes
-            SET used_at = ?
-            WHERE household_id = ?
-            AND used_at IS NULL;
+            SET used_at = %s
+            WHERE household_id = %s
+              AND used_at IS NULL;
             """,
             (
-                now_text,
+                now,
                 household_id,
             ),
         )
@@ -573,21 +580,32 @@ def create_household_verification(
                 expires_at,
                 used_at
             )
-            VALUES (?, ?, ?, 0, ?, ?, ?, NULL);
+            VALUES (
+                %s,
+                %s,
+                %s,
+                0,
+                %s,
+                %s,
+                %s,
+                NULL
+            );
             """,
             (
                 household_id,
                 code_hash,
                 salt,
                 VERIFICATION_MAX_ATTEMPTS,
-                now_text,
-                expires_text,
+                now,
+                expires_at,
             ),
         )
 
     return {
         "household_reference":
-            stored_reference,
+            household[
+                "household_reference"
+            ],
 
         "email":
             email,
@@ -610,6 +628,14 @@ def verify_household_code(
 ) -> tuple[bool, str]:
     """
     Verify a one-time household email code.
+
+    Status values:
+        verified
+        invalid
+        expired
+        locked
+        no_active_code
+        household_not_found
     """
 
     household_reference = (
@@ -618,10 +644,14 @@ def verify_household_code(
         .upper()
     )
 
-    code = code.strip()
+    code = (
+        code
+        .strip()
+    )
 
-    now = datetime.now(timezone.utc)
-    now_text = now.isoformat()
+    now = datetime.now(
+        timezone.utc
+    )
 
     with _connect() as conn:
 
@@ -629,15 +659,23 @@ def verify_household_code(
             """
             SELECT household_id
             FROM households
-            WHERE household_reference = ?;
+            WHERE household_reference = %s;
             """,
-            (household_reference,),
+            (
+                household_reference,
+            ),
         ).fetchone()
 
         if household is None:
-            return False, "household_not_found"
 
-        household_id = household[0]
+            return (
+                False,
+                "household_not_found",
+            )
+
+        household_id = household[
+            "household_id"
+        ]
 
         verification = conn.execute(
             """
@@ -649,55 +687,88 @@ def verify_household_code(
                 max_attempts,
                 expires_at
             FROM verification_codes
-            WHERE household_id = ?
-            AND used_at IS NULL
+            WHERE household_id = %s
+              AND used_at IS NULL
             ORDER BY verification_id DESC
             LIMIT 1;
             """,
-            (household_id,),
+            (
+                household_id,
+            ),
         ).fetchone()
 
         if verification is None:
-            return False, "no_active_code"
 
-        verification_id = verification[0]
-        stored_hash = verification[1]
-        salt = verification[2]
-        attempt_count = verification[3]
-        max_attempts = verification[4]
-        expires_at_text = verification[5]
+            return (
+                False,
+                "no_active_code",
+            )
 
-        expires_at = datetime.fromisoformat(
-            expires_at_text
-        )
+        verification_id = verification[
+            "verification_id"
+        ]
+
+        stored_hash = verification[
+            "code_hash"
+        ]
+
+        salt = verification[
+            "salt"
+        ]
+
+        attempt_count = verification[
+            "attempt_count"
+        ]
+
+        max_attempts = verification[
+            "max_attempts"
+        ]
+
+        expires_at = verification[
+            "expires_at"
+        ]
 
         if now >= expires_at:
 
             conn.execute(
                 """
                 UPDATE verification_codes
-                SET used_at = ?
-                WHERE verification_id = ?;
+                SET used_at = %s
+                WHERE verification_id = %s;
                 """,
                 (
-                    now_text,
+                    now,
                     verification_id,
                 ),
             )
 
-            return False, "expired"
+            return (
+                False,
+                "expired",
+            )
 
-        if attempt_count >= max_attempts:
-            return False, "locked"
+        if (
+            attempt_count
+            >= max_attempts
+        ):
 
-        submitted_hash = _hash_verification_code(
-            code,
-            salt,
+            return (
+                False,
+                "locked",
+            )
+
+        submitted_hash = (
+            _hash_verification_code(
+                code,
+                salt,
+            )
         )
 
-        code_matches = secrets.compare_digest(
-            stored_hash,
-            submitted_hash,
+        code_matches = (
+            secrets.compare_digest(
+                stored_hash,
+                submitted_hash,
+            )
         )
 
         if code_matches:
@@ -705,45 +776,54 @@ def verify_household_code(
             conn.execute(
                 """
                 UPDATE verification_codes
-                SET used_at = ?
-                WHERE verification_id = ?;
+                SET used_at = %s
+                WHERE verification_id = %s;
                 """,
                 (
-                    now_text,
+                    now,
                     verification_id,
                 ),
             )
 
-            return True, "verified"
+            return (
+                True,
+                "verified",
+            )
 
         new_attempt_count = (
             attempt_count + 1
         )
 
-        if new_attempt_count >= max_attempts:
+        if (
+            new_attempt_count
+            >= max_attempts
+        ):
 
             conn.execute(
                 """
                 UPDATE verification_codes
                 SET
-                    attempt_count = ?,
-                    used_at = ?
-                WHERE verification_id = ?;
+                    attempt_count = %s,
+                    used_at = %s
+                WHERE verification_id = %s;
                 """,
                 (
                     new_attempt_count,
-                    now_text,
+                    now,
                     verification_id,
                 ),
             )
 
-            return False, "locked"
+            return (
+                False,
+                "locked",
+            )
 
         conn.execute(
             """
             UPDATE verification_codes
-            SET attempt_count = ?
-            WHERE verification_id = ?;
+            SET attempt_count = %s
+            WHERE verification_id = %s;
             """,
             (
                 new_attempt_count,
@@ -751,50 +831,66 @@ def verify_household_code(
             ),
         )
 
-        return False, "invalid"
+        return (
+            False,
+            "invalid",
+        )
 
 
 # ---------------------------------------------------------
-# Create admin verification code
+# Create admin verification
 # ---------------------------------------------------------
 
 def create_admin_verification(
     email: str,
 ) -> dict:
     """
-    Create a one-time verification code for an
-    authorized administrator.
+    Create a one-time verification code for
+    an authorized administrator.
 
-    Authorization itself is handled by app.py.
+    Admin authorization itself remains handled
+    by app.py.
     """
 
-    email = email.strip().lower()
+    email = (
+        email
+        .strip()
+        .lower()
+    )
 
     if not email:
+
         raise ValueError(
             "Admin email cannot be empty."
         )
 
-    code = _generate_verification_code()
-
-    salt = secrets.token_hex(16)
-
-    code_hash = _hash_verification_code(
-        code,
-        salt,
+    code = (
+        _generate_verification_code()
     )
 
-    now = datetime.now(timezone.utc)
+    salt = secrets.token_hex(
+        16
+    )
+
+    code_hash = (
+        _hash_verification_code(
+            code,
+            salt,
+        )
+    )
+
+    now = datetime.now(
+        timezone.utc
+    )
 
     expires_at = (
         now
         + timedelta(
-            minutes=VERIFICATION_CODE_TTL_MINUTES
+            minutes=(
+                VERIFICATION_CODE_TTL_MINUTES
+            )
         )
     )
-
-    now_text = now.isoformat()
-    expires_text = expires_at.isoformat()
 
     with _connect() as conn:
 
@@ -802,12 +898,12 @@ def create_admin_verification(
         conn.execute(
             """
             UPDATE admin_verification_codes
-            SET used_at = ?
-            WHERE LOWER(TRIM(email)) = ?
-            AND used_at IS NULL;
+            SET used_at = %s
+            WHERE LOWER(TRIM(email)) = %s
+              AND used_at IS NULL;
             """,
             (
-                now_text,
+                now,
                 email,
             ),
         )
@@ -824,15 +920,24 @@ def create_admin_verification(
                 expires_at,
                 used_at
             )
-            VALUES (?, ?, ?, 0, ?, ?, ?, NULL);
+            VALUES (
+                %s,
+                %s,
+                %s,
+                0,
+                %s,
+                %s,
+                %s,
+                NULL
+            );
             """,
             (
                 email,
                 code_hash,
                 salt,
                 VERIFICATION_MAX_ATTEMPTS,
-                now_text,
-                expires_text,
+                now,
+                expires_at,
             ),
         )
 
@@ -860,14 +965,27 @@ def verify_admin_code(
     Verify a one-time administrator login code.
     """
 
-    email = email.strip().lower()
-    code = code.strip()
+    email = (
+        email
+        .strip()
+        .lower()
+    )
+
+    code = (
+        code
+        .strip()
+    )
 
     if not email:
-        return False, "no_active_code"
 
-    now = datetime.now(timezone.utc)
-    now_text = now.isoformat()
+        return (
+            False,
+            "no_active_code",
+        )
+
+    now = datetime.now(
+        timezone.utc
+    )
 
     with _connect() as conn:
 
@@ -881,55 +999,88 @@ def verify_admin_code(
                 max_attempts,
                 expires_at
             FROM admin_verification_codes
-            WHERE LOWER(TRIM(email)) = ?
-            AND used_at IS NULL
+            WHERE LOWER(TRIM(email)) = %s
+              AND used_at IS NULL
             ORDER BY verification_id DESC
             LIMIT 1;
             """,
-            (email,),
+            (
+                email,
+            ),
         ).fetchone()
 
         if verification is None:
-            return False, "no_active_code"
 
-        verification_id = verification[0]
-        stored_hash = verification[1]
-        salt = verification[2]
-        attempt_count = verification[3]
-        max_attempts = verification[4]
-        expires_at_text = verification[5]
+            return (
+                False,
+                "no_active_code",
+            )
 
-        expires_at = datetime.fromisoformat(
-            expires_at_text
-        )
+        verification_id = verification[
+            "verification_id"
+        ]
+
+        stored_hash = verification[
+            "code_hash"
+        ]
+
+        salt = verification[
+            "salt"
+        ]
+
+        attempt_count = verification[
+            "attempt_count"
+        ]
+
+        max_attempts = verification[
+            "max_attempts"
+        ]
+
+        expires_at = verification[
+            "expires_at"
+        ]
 
         if now >= expires_at:
 
             conn.execute(
                 """
                 UPDATE admin_verification_codes
-                SET used_at = ?
-                WHERE verification_id = ?;
+                SET used_at = %s
+                WHERE verification_id = %s;
                 """,
                 (
-                    now_text,
+                    now,
                     verification_id,
                 ),
             )
 
-            return False, "expired"
+            return (
+                False,
+                "expired",
+            )
 
-        if attempt_count >= max_attempts:
-            return False, "locked"
+        if (
+            attempt_count
+            >= max_attempts
+        ):
 
-        submitted_hash = _hash_verification_code(
-            code,
-            salt,
+            return (
+                False,
+                "locked",
+            )
+
+        submitted_hash = (
+            _hash_verification_code(
+                code,
+                salt,
+            )
         )
 
-        code_matches = secrets.compare_digest(
-            stored_hash,
-            submitted_hash,
+        code_matches = (
+            secrets.compare_digest(
+                stored_hash,
+                submitted_hash,
+            )
         )
 
         if code_matches:
@@ -937,45 +1088,54 @@ def verify_admin_code(
             conn.execute(
                 """
                 UPDATE admin_verification_codes
-                SET used_at = ?
-                WHERE verification_id = ?;
+                SET used_at = %s
+                WHERE verification_id = %s;
                 """,
                 (
-                    now_text,
+                    now,
                     verification_id,
                 ),
             )
 
-            return True, "verified"
+            return (
+                True,
+                "verified",
+            )
 
         new_attempt_count = (
             attempt_count + 1
         )
 
-        if new_attempt_count >= max_attempts:
+        if (
+            new_attempt_count
+            >= max_attempts
+        ):
 
             conn.execute(
                 """
                 UPDATE admin_verification_codes
                 SET
-                    attempt_count = ?,
-                    used_at = ?
-                WHERE verification_id = ?;
+                    attempt_count = %s,
+                    used_at = %s
+                WHERE verification_id = %s;
                 """,
                 (
                     new_attempt_count,
-                    now_text,
+                    now,
                     verification_id,
                 ),
             )
 
-            return False, "locked"
+            return (
+                False,
+                "locked",
+            )
 
         conn.execute(
             """
             UPDATE admin_verification_codes
-            SET attempt_count = ?
-            WHERE verification_id = ?;
+            SET attempt_count = %s
+            WHERE verification_id = %s;
             """,
             (
                 new_attempt_count,
@@ -983,7 +1143,10 @@ def verify_admin_code(
             ),
         )
 
-        return False, "invalid"
+        return (
+            False,
+            "invalid",
+        )
 
 
 # ---------------------------------------------------------
@@ -997,9 +1160,13 @@ def save_registration(
     """
     Save one complete new household registration
     and all of its children.
+
+    The entire registration is committed as one
+    PostgreSQL transaction.
     """
 
     if not children:
+
         raise ValueError(
             "At least one child must be added."
         )
@@ -1010,11 +1177,7 @@ def save_registration(
 
     with _connect() as conn:
 
-        # ---------------------------------------------
-        # Insert household
-        # ---------------------------------------------
-
-        cursor = conn.execute(
+        household_row = conn.execute(
             """
             INSERT INTO households (
                 household_reference,
@@ -1031,14 +1194,28 @@ def save_registration(
 
                 address_line_1,
                 address_line_2,
+
                 city,
                 state,
                 zip_code
             )
             VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?
-            );
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s,
+                %s
+            )
+            RETURNING household_id;
             """,
             (
                 household_reference,
@@ -1088,39 +1265,35 @@ def save_registration(
                     "",
                 ),
 
-                household["city"],
-                household["state"],
-                household["zip_code"],
+                household[
+                    "city"
+                ],
+
+                household[
+                    "state"
+                ],
+
+                household[
+                    "zip_code"
+                ],
             ),
-        )
+        ).fetchone()
 
-        household_id = cursor.lastrowid
-
-        # ---------------------------------------------
-        # Insert children
-        # ---------------------------------------------
+        household_id = household_row[
+            "household_id"
+        ]
 
         for child in children:
-
-            date_of_birth = (
-                child["date_of_birth"]
-            )
-
-            if hasattr(
-                date_of_birth,
-                "isoformat",
-            ):
-                date_of_birth = (
-                    date_of_birth.isoformat()
-                )
 
             conn.execute(
                 """
                 INSERT INTO children (
                     household_id,
+
                     first_name,
                     middle_name,
                     last_name,
+
                     date_of_birth,
                     grade,
                     school,
@@ -1133,8 +1306,18 @@ def save_registration(
                     first_communion_status
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?, ?
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s
                 );
                 """,
                 (
@@ -1153,7 +1336,9 @@ def save_registration(
                         "last_name"
                     ],
 
-                    date_of_birth,
+                    child[
+                        "date_of_birth"
+                    ],
 
                     child[
                         "grade"
@@ -1163,14 +1348,14 @@ def save_registration(
                         "school"
                     ],
 
-                    int(
+                    bool(
                         child.get(
                             "receiving_first_communion_reconciliation",
                             False,
                         )
                     ),
 
-                    int(
+                    bool(
                         child.get(
                             "receiving_confirmation",
                             False,
@@ -1205,11 +1390,11 @@ def get_registration_by_reference(
     household_reference: str,
 ) -> tuple[dict, list[dict]] | None:
     """
-    Load a household and all of its children using
+    Load a household and all children using
     the public Household ID.
 
-    This should only be called by the public application
-    AFTER email verification.
+    app.py should only call this after the
+    household has passed email verification.
     """
 
     household_reference = (
@@ -1220,76 +1405,46 @@ def get_registration_by_reference(
 
     with _connect() as conn:
 
-        conn.row_factory = sqlite3.Row
-
-        household_row = conn.execute(
+        household = conn.execute(
             """
             SELECT *
             FROM households
-            WHERE household_reference = ?;
+            WHERE household_reference = %s;
             """,
-            (household_reference,),
+            (
+                household_reference,
+            ),
         ).fetchone()
 
-        if household_row is None:
+        if household is None:
+
             return None
 
         child_rows = conn.execute(
             """
             SELECT *
             FROM children
-            WHERE household_id = ?
+            WHERE household_id = %s
             ORDER BY child_id;
             """,
             (
-                household_row[
+                household[
                     "household_id"
                 ],
             ),
         ).fetchall()
 
-    household = dict(
-        household_row
-    )
+    # dict_row already gives us dictionaries.
+    # PostgreSQL DATE values are returned as Python dates
+    # and BOOLEAN values are returned as Python bools.
 
-    children = []
-
-    for row in child_rows:
-
-        child = dict(row)
-
-        child["date_of_birth"] = (
-            date.fromisoformat(
-                child[
-                    "date_of_birth"
-                ]
-            )
-        )
-
-        child[
-            "receiving_first_communion_reconciliation"
-        ] = bool(
-            child.get(
-                "receiving_first_communion_reconciliation",
-                0,
-            )
-        )
-
-        child[
-            "receiving_confirmation"
-        ] = bool(
-            child.get(
-                "receiving_confirmation",
-                0,
-            )
-        )
-
-        children.append(
-            child
-        )
+    children = [
+        dict(row)
+        for row in child_rows
+    ]
 
     return (
-        household,
+        dict(household),
         children,
     )
 
@@ -1307,46 +1462,48 @@ def update_registration(
     Update an existing household registration.
 
     Handles:
-        - household changes
-        - edited children
-        - newly added children
-        - removed children
-        - sacramental preparation
-        - sacramental history
+        household changes
+        edited children
+        new children
+        removed children
+        sacrament preparation
+        sacramental history
     """
 
     if not children:
+
         raise ValueError(
             "At least one child must be added."
         )
 
     with _connect() as conn:
 
-        # ---------------------------------------------
+        # -------------------------------------------------
         # Update household
-        # ---------------------------------------------
+        # -------------------------------------------------
 
         conn.execute(
             """
             UPDATE households
             SET
-                parent_a_first_name = ?,
-                parent_a_last_name = ?,
-                parent_a_email = ?,
-                parent_a_phone = ?,
+                parent_a_first_name = %s,
+                parent_a_last_name = %s,
+                parent_a_email = %s,
+                parent_a_phone = %s,
 
-                parent_b_first_name = ?,
-                parent_b_last_name = ?,
-                parent_b_email = ?,
-                parent_b_phone = ?,
+                parent_b_first_name = %s,
+                parent_b_last_name = %s,
+                parent_b_email = %s,
+                parent_b_phone = %s,
 
-                address_line_1 = ?,
-                address_line_2 = ?,
-                city = ?,
-                state = ?,
-                zip_code = ?
+                address_line_1 = %s,
+                address_line_2 = %s,
 
-            WHERE household_id = ?;
+                city = %s,
+                state = %s,
+                zip_code = %s
+
+            WHERE household_id = %s;
             """,
             (
                 household[
@@ -1410,39 +1567,45 @@ def update_registration(
             ),
         )
 
-        # ---------------------------------------------
+        # -------------------------------------------------
         # Existing child IDs
-        # ---------------------------------------------
+        # -------------------------------------------------
+
+        existing_rows = conn.execute(
+            """
+            SELECT child_id
+            FROM children
+            WHERE household_id = %s;
+            """,
+            (
+                household_id,
+            ),
+        ).fetchall()
 
         existing_child_ids = {
-            row[0]
-            for row in conn.execute(
-                """
-                SELECT child_id
-                FROM children
-                WHERE household_id = ?;
-                """,
-                (
-                    household_id,
-                ),
-            ).fetchall()
+            row[
+                "child_id"
+            ]
+            for row in existing_rows
         }
 
-        # ---------------------------------------------
-        # Child IDs still present in submitted data
-        # ---------------------------------------------
+        # -------------------------------------------------
+        # Submitted existing IDs
+        # -------------------------------------------------
 
         submitted_child_ids = {
-            child["child_id"]
+            child[
+                "child_id"
+            ]
             for child in children
             if child.get(
                 "child_id"
             ) is not None
         }
 
-        # ---------------------------------------------
+        # -------------------------------------------------
         # Delete removed children
-        # ---------------------------------------------
+        # -------------------------------------------------
 
         children_to_delete = (
             existing_child_ids
@@ -1454,8 +1617,8 @@ def update_registration(
             conn.execute(
                 """
                 DELETE FROM children
-                WHERE child_id = ?
-                AND household_id = ?;
+                WHERE child_id = %s
+                  AND household_id = %s;
                 """,
                 (
                     child_id,
@@ -1463,33 +1626,19 @@ def update_registration(
                 ),
             )
 
-        # ---------------------------------------------
+        # -------------------------------------------------
         # Update existing / insert new children
-        # ---------------------------------------------
+        # -------------------------------------------------
 
         for child in children:
-
-            date_of_birth = (
-                child[
-                    "date_of_birth"
-                ]
-            )
-
-            if hasattr(
-                date_of_birth,
-                "isoformat",
-            ):
-                date_of_birth = (
-                    date_of_birth.isoformat()
-                )
 
             child_id = child.get(
                 "child_id"
             )
 
-            # -----------------------------------------
+            # ---------------------------------------------
             # Existing child
-            # -----------------------------------------
+            # ---------------------------------------------
 
             if child_id is not None:
 
@@ -1497,22 +1646,24 @@ def update_registration(
                     """
                     UPDATE children
                     SET
-                        first_name = ?,
-                        middle_name = ?,
-                        last_name = ?,
-                        date_of_birth = ?,
-                        grade = ?,
-                        school = ?,
+                        first_name = %s,
+                        middle_name = %s,
+                        last_name = %s,
 
-                        receiving_first_communion_reconciliation = ?,
-                        receiving_confirmation = ?,
+                        date_of_birth = %s,
 
-                        baptism_status = ?,
-                        first_reconciliation_status = ?,
-                        first_communion_status = ?
+                        grade = %s,
+                        school = %s,
 
-                    WHERE child_id = ?
-                    AND household_id = ?;
+                        receiving_first_communion_reconciliation = %s,
+                        receiving_confirmation = %s,
+
+                        baptism_status = %s,
+                        first_reconciliation_status = %s,
+                        first_communion_status = %s
+
+                    WHERE child_id = %s
+                      AND household_id = %s;
                     """,
                     (
                         child[
@@ -1528,7 +1679,9 @@ def update_registration(
                             "last_name"
                         ],
 
-                        date_of_birth,
+                        child[
+                            "date_of_birth"
+                        ],
 
                         child[
                             "grade"
@@ -1538,14 +1691,14 @@ def update_registration(
                             "school"
                         ],
 
-                        int(
+                        bool(
                             child.get(
                                 "receiving_first_communion_reconciliation",
                                 False,
                             )
                         ),
 
-                        int(
+                        bool(
                             child.get(
                                 "receiving_confirmation",
                                 False,
@@ -1570,9 +1723,9 @@ def update_registration(
                     ),
                 )
 
-            # -----------------------------------------
+            # ---------------------------------------------
             # New child
-            # -----------------------------------------
+            # ---------------------------------------------
 
             else:
 
@@ -1580,10 +1733,13 @@ def update_registration(
                     """
                     INSERT INTO children (
                         household_id,
+
                         first_name,
                         middle_name,
                         last_name,
+
                         date_of_birth,
+
                         grade,
                         school,
 
@@ -1595,8 +1751,18 @@ def update_registration(
                         first_communion_status
                     )
                     VALUES (
-                        ?, ?, ?, ?, ?, ?, ?,
-                        ?, ?, ?, ?, ?
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s
                     );
                     """,
                     (
@@ -1615,7 +1781,9 @@ def update_registration(
                             "last_name"
                         ],
 
-                        date_of_birth,
+                        child[
+                            "date_of_birth"
+                        ],
 
                         child[
                             "grade"
@@ -1625,14 +1793,14 @@ def update_registration(
                             "school"
                         ],
 
-                        int(
+                        bool(
                             child.get(
                                 "receiving_first_communion_reconciliation",
                                 False,
                             )
                         ),
 
-                        int(
+                        bool(
                             child.get(
                                 "receiving_confirmation",
                                 False,
@@ -1660,16 +1828,12 @@ def update_registration(
 
 def get_admin_roster() -> list[dict]:
     """
-    Return all registered children with their associated
-    household information for the administrative dashboard.
-
-    The application is responsible for ensuring this is
-    only called after an administrator is authenticated.
+    Return all registered children with their
+    associated household information for
+    the administrative dashboard.
     """
 
     with _connect() as conn:
-
-        conn.row_factory = sqlite3.Row
 
         rows = conn.execute(
             """
@@ -1680,7 +1844,9 @@ def get_admin_roster() -> list[dict]:
                 c.first_name,
                 c.middle_name,
                 c.last_name,
+
                 c.date_of_birth,
+
                 c.grade,
                 c.school,
 
@@ -1705,6 +1871,7 @@ def get_admin_roster() -> list[dict]:
 
                 h.address_line_1,
                 h.address_line_2,
+
                 h.city,
                 h.state,
                 h.zip_code
@@ -1738,53 +1905,20 @@ def get_admin_roster() -> list[dict]:
             """
         ).fetchall()
 
-    roster = []
-
-    for row in rows:
-
-        child = dict(row)
-
-        child["date_of_birth"] = (
-            date.fromisoformat(
-                child[
-                    "date_of_birth"
-                ]
-            )
-        )
-
-        child[
-            "receiving_first_communion_reconciliation"
-        ] = bool(
-            child[
-                "receiving_first_communion_reconciliation"
-            ]
-        )
-
-        child[
-            "receiving_confirmation"
-        ] = bool(
-            child[
-                "receiving_confirmation"
-            ]
-        )
-
-        roster.append(
-            child
-        )
-
-    return roster
+    return [
+        dict(row)
+        for row in rows
+    ]
 
 
 # ---------------------------------------------------------
-# Roster groups / catechists
+# Roster groups
 # ---------------------------------------------------------
 
 def get_roster_groups() -> list[dict]:
     """
-    Return all configured PSR and Youth Ministry
-    roster groups, including their catechist names.
-
-    Results are returned in ministry/grade order.
+    Return the standard PSR and Youth Ministry
+    roster groups including editable catechist names.
     """
 
     group_order = [
@@ -1800,8 +1934,6 @@ def get_roster_groups() -> list[dict]:
 
     with _connect() as conn:
 
-        conn.row_factory = sqlite3.Row
-
         rows = conn.execute(
             """
             SELECT
@@ -1809,36 +1941,40 @@ def get_roster_groups() -> list[dict]:
                 display_name,
                 category,
                 catechists
-
             FROM roster_groups;
             """
         ).fetchall()
 
     groups_by_key = {
-        row["group_key"]: dict(row)
+        row[
+            "group_key"
+        ]: dict(row)
         for row in rows
     }
 
     return [
-        groups_by_key[group_key]
+        groups_by_key[
+            group_key
+        ]
         for group_key in group_order
         if group_key in groups_by_key
     ]
 
+
+# ---------------------------------------------------------
+# Update roster catechists
+# ---------------------------------------------------------
 
 def update_roster_group_catechists(
     group_key: str,
     catechists: str,
 ) -> None:
     """
-    Update the editable catechist field for a roster group.
+    Update the editable catechist names
+    for one roster group.
 
     Example:
-
-        update_roster_group_catechists(
-            "grade_2",
-            "Jane Smith, John Doe",
-        )
+        Jane Smith, John Doe
     """
 
     group_key = (
@@ -1853,6 +1989,7 @@ def update_roster_group_catechists(
     )
 
     if not group_key:
+
         raise ValueError(
             "Roster group cannot be empty."
         )
@@ -1862,8 +1999,8 @@ def update_roster_group_catechists(
         cursor = conn.execute(
             """
             UPDATE roster_groups
-            SET catechists = ?
-            WHERE group_key = ?;
+            SET catechists = %s
+            WHERE group_key = %s;
             """,
             (
                 catechists,
@@ -1872,6 +2009,8 @@ def update_roster_group_catechists(
         )
 
         if cursor.rowcount == 0:
+
             raise ValueError(
-                f"Unknown roster group: {group_key}"
+                f"Unknown roster group: "
+                f"{group_key}"
             )

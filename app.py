@@ -4,16 +4,19 @@ import re
 import streamlit as st
 
 from db import (
+    create_admin_verification,
     create_household_verification,
     get_household_references_by_email,
     get_registration_by_reference,
     init_db,
     save_registration,
     update_registration,
+    verify_admin_code,
     verify_household_code,
 )
 
 from email_service import (
+    send_admin_verification_email,
     send_household_id_recovery,
     send_registration_confirmation,
     send_update_confirmation,
@@ -136,6 +139,40 @@ def mask_email(email: str) -> str:
     return f"{masked_username}@{domain}"
 
 
+def get_admin_emails() -> set[str]:
+    """
+    Read the approved admin email addresses
+    from Streamlit secrets.
+    """
+
+    try:
+        emails = st.secrets["admins"]["emails"]
+
+    except (KeyError, FileNotFoundError):
+        return set()
+
+    # Allow either a list or a single string.
+    if isinstance(emails, str):
+        emails = [emails]
+
+    return {
+        str(email).strip().lower()
+        for email in emails
+        if str(email).strip()
+    }
+
+
+def is_authorized_admin(email: str) -> bool:
+    """
+    Return True if the supplied email address is
+    present in the private admin allowlist.
+    """
+
+    normalized_email = email.strip().lower()
+
+    return normalized_email in get_admin_emails()
+
+
 def clear_verification_state() -> None:
     st.session_state.verification_reference = None
     st.session_state.verification_email = None
@@ -145,6 +182,17 @@ def clear_verification_state() -> None:
 def clear_recovery_state() -> None:
     st.session_state.show_recovery_dialog = False
     st.session_state.recovery_request_sent = False
+
+
+def clear_admin_login_state() -> None:
+    """
+    Clear temporary admin-login information.
+
+    This does not log out an already authenticated admin.
+    """
+
+    st.session_state.admin_verification_email = None
+    st.session_state.show_admin_dialog = False
 
 
 def sacrament_status_index(status: str | None) -> int:
@@ -285,7 +333,7 @@ init_db()
 
 
 # ---------------------------------------------------------
-# Session state
+# Registration session state
 # ---------------------------------------------------------
 
 if "household" not in st.session_state:
@@ -311,7 +359,7 @@ if "existing_household_reference" not in st.session_state:
 
 
 # ---------------------------------------------------------
-# Verification session state
+# Household verification session state
 # ---------------------------------------------------------
 
 if "verification_reference" not in st.session_state:
@@ -336,6 +384,23 @@ if "recovery_request_sent" not in st.session_state:
 
 
 # ---------------------------------------------------------
+# Admin session state
+# ---------------------------------------------------------
+
+if "show_admin_dialog" not in st.session_state:
+    st.session_state.show_admin_dialog = False
+
+if "admin_verification_email" not in st.session_state:
+    st.session_state.admin_verification_email = None
+
+if "admin_authenticated" not in st.session_state:
+    st.session_state.admin_authenticated = False
+
+if "admin_email" not in st.session_state:
+    st.session_state.admin_email = None
+
+
+# ---------------------------------------------------------
 # Confirmation email session state
 # ---------------------------------------------------------
 
@@ -347,6 +412,267 @@ if "confirmation_email_address" not in st.session_state:
 
 if "confirmation_email_error" not in st.session_state:
     st.session_state.confirmation_email_error = None
+
+
+# ---------------------------------------------------------
+# Admin login dialog
+# ---------------------------------------------------------
+
+@st.dialog("Admin Login")
+def admin_login_dialog():
+
+    # -----------------------------------------------------
+    # Stage 1: Admin email
+    # -----------------------------------------------------
+
+    if st.session_state.admin_verification_email is None:
+
+        st.write(
+            "Enter your authorized administrator "
+            "email address."
+        )
+
+        admin_email = st.text_input(
+            "Admin Email",
+            placeholder="name@example.com",
+        )
+
+        if st.button(
+            "Send Login Code",
+            type="primary",
+            use_container_width=True,
+        ):
+
+            admin_email = (
+                admin_email
+                .strip()
+                .lower()
+            )
+
+            if not admin_email:
+
+                st.error(
+                    "Please enter your email address."
+                )
+
+                return
+
+            if not is_valid_email(
+                admin_email
+            ):
+
+                st.error(
+                    "Please enter a valid email address."
+                )
+
+                return
+
+            try:
+
+                # Store the email regardless of whether it is
+                # authorized so the UI does not reveal which
+                # addresses are on the admin allowlist.
+                st.session_state.admin_verification_email = (
+                    admin_email
+                )
+
+                if is_authorized_admin(
+                    admin_email
+                ):
+
+                    verification = (
+                        create_admin_verification(
+                            admin_email
+                        )
+                    )
+
+                    send_admin_verification_email(
+                        recipient=verification["email"],
+                        verification_code=verification["code"],
+                        expires_minutes=(
+                            verification[
+                                "expires_minutes"
+                            ]
+                        ),
+                    )
+
+                st.session_state.show_admin_dialog = True
+
+                st.rerun()
+
+            except Exception:
+
+                st.session_state.admin_verification_email = None
+
+                st.error(
+                    "We couldn't process the login request "
+                    "right now. Please try again."
+                )
+
+        return
+
+    # -----------------------------------------------------
+    # Stage 2: Verification code
+    # -----------------------------------------------------
+
+    admin_email = (
+        st.session_state.admin_verification_email
+    )
+
+    st.success(
+        "Login request received."
+    )
+
+    st.write(
+        "If this email address is authorized, "
+        "a 6-digit login code has been sent to:"
+    )
+
+    st.write(
+        f"**{mask_email(admin_email)}**"
+    )
+
+    st.caption(
+        "The code expires in 10 minutes."
+    )
+
+    verification_code = st.text_input(
+        "Admin Login Code",
+        max_chars=6,
+        placeholder="123456",
+    )
+
+    if st.button(
+        "Verify & Sign In",
+        type="primary",
+        use_container_width=True,
+    ):
+
+        if not verification_code.strip():
+
+            st.error(
+                "Please enter the login code."
+            )
+
+            return
+
+        verified, status = verify_admin_code(
+            admin_email,
+            verification_code,
+        )
+
+        if not verified:
+
+            if status == "expired":
+
+                st.error(
+                    "That login code has expired. "
+                    "Please request a new one."
+                )
+
+            elif status == "locked":
+
+                st.error(
+                    "Too many incorrect attempts. "
+                    "Please request a new code."
+                )
+
+            elif status == "no_active_code":
+
+                st.error(
+                    "That code is invalid or no longer active."
+                )
+
+            else:
+
+                st.error(
+                    "That login code is incorrect."
+                )
+
+            return
+
+        # -------------------------------------------------
+        # Extra authorization check
+        # -------------------------------------------------
+        #
+        # The code can only have been generated for an
+        # authorized email, but we check the allowlist again
+        # before creating the admin session.
+        # -------------------------------------------------
+
+        if not is_authorized_admin(
+            admin_email
+        ):
+
+            clear_admin_login_state()
+
+            st.error(
+                "Administrator access is not authorized."
+            )
+
+            return
+
+        st.session_state.admin_authenticated = True
+        st.session_state.admin_email = admin_email
+
+        clear_admin_login_state()
+
+        st.rerun()
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Resend admin code
+    # -----------------------------------------------------
+
+    if st.button(
+        "Send a New Code",
+        use_container_width=True,
+    ):
+
+        try:
+
+            if is_authorized_admin(
+                admin_email
+            ):
+
+                verification = (
+                    create_admin_verification(
+                        admin_email
+                    )
+                )
+
+                send_admin_verification_email(
+                    recipient=verification["email"],
+                    verification_code=verification["code"],
+                    expires_minutes=(
+                        verification[
+                            "expires_minutes"
+                        ]
+                    ),
+                )
+
+            st.success(
+                "If this email address is authorized, "
+                "a new login code has been sent."
+            )
+
+        except Exception:
+
+            st.error(
+                "We couldn't process the request "
+                "right now. Please try again."
+            )
+
+    if st.button(
+        "Use a Different Email",
+        use_container_width=True,
+    ):
+
+        st.session_state.admin_verification_email = None
+        st.session_state.show_admin_dialog = True
+
+        st.rerun()
 
 
 # ---------------------------------------------------------
@@ -421,15 +747,19 @@ def recover_household_id_dialog():
         email = email.strip()
 
         if not email:
+
             st.error(
                 "Please enter your email address."
             )
+
             return
 
         if not is_valid_email(email):
+
             st.error(
                 "Please enter a valid email address."
             )
+
             return
 
         try:
@@ -721,6 +1051,7 @@ def existing_household_dialog():
 
         clear_verification_state()
         clear_recovery_state()
+        clear_admin_login_state()
 
         st.rerun()
 
@@ -1383,8 +1714,6 @@ def child_dialog(
             ),
         )
 
-        # Confirmation requires all three previous
-        # sacramental-history questions.
         if receiving_confirmation:
 
             first_reconciliation_status = (
@@ -1412,10 +1741,6 @@ def child_dialog(
                     ),
                 )
             )
-
-        # ---------------------------------------------
-        # Live follow-up warning
-        # ---------------------------------------------
 
         preview_child = {
             "receiving_first_communion_reconciliation":
@@ -1454,8 +1779,6 @@ def child_dialog(
             )
         )
 
-        # Only show the follow-up warning after
-        # applicable questions have actually been answered.
         history_questions_complete = (
             baptism_status != "Select one"
         )
@@ -1582,8 +1905,7 @@ def child_dialog(
                 return
 
         # -------------------------------------------------
-        # Preserve previously known sacramental history
-        # when a question isn't currently applicable.
+        # Preserve existing sacramental history
         # -------------------------------------------------
 
         if sacramental_history_needed:
@@ -1658,8 +1980,6 @@ def child_dialog(
                 saved_first_communion_status,
         }
 
-        # Preserve database child_id when editing
-        # an existing child.
         if (
             editing
             and child.get(
@@ -1854,10 +2174,6 @@ def review_dialog():
                     preparation
                 )
             )
-
-        # ---------------------------------------------
-        # Sacramental history
-        # ---------------------------------------------
 
         history_parts = []
 
@@ -2063,6 +2379,53 @@ def review_dialog():
 
 
 # ---------------------------------------------------------
+# Admin success page
+# ---------------------------------------------------------
+
+if st.session_state.admin_authenticated:
+
+    st.title(
+        "Ascension Registration"
+    )
+
+    st.subheader(
+        "Admin"
+    )
+
+    st.success(
+        "Admin Login Successful"
+    )
+
+    st.write(
+        "Signed in as:"
+    )
+
+    st.write(
+        f"**{st.session_state.admin_email}**"
+    )
+
+    st.info(
+        "The administrative dashboard will be built here."
+    )
+
+    st.divider()
+
+    if st.button(
+        "Log Out",
+        use_container_width=True,
+    ):
+
+        st.session_state.admin_authenticated = False
+        st.session_state.admin_email = None
+
+        clear_admin_login_state()
+
+        st.rerun()
+
+    st.stop()
+
+
+# ---------------------------------------------------------
 # Registration complete
 # ---------------------------------------------------------
 
@@ -2158,6 +2521,7 @@ if (
 
         clear_verification_state()
         clear_recovery_state()
+        clear_admin_login_state()
 
         st.rerun()
 
@@ -2212,6 +2576,7 @@ if (
 
             clear_verification_state()
             clear_recovery_state()
+            clear_admin_login_state()
 
             st.rerun()
 
@@ -2227,6 +2592,7 @@ if (
         ):
 
             clear_recovery_state()
+            clear_admin_login_state()
 
             st.session_state.show_existing_dialog = True
 
@@ -2248,10 +2614,33 @@ if (
     ):
 
         clear_verification_state()
+        clear_admin_login_state()
 
         st.session_state.show_recovery_dialog = True
 
         st.rerun()
+
+    # -----------------------------------------------------
+    # Admin login
+    # -----------------------------------------------------
+
+    st.divider()
+
+    if st.button(
+        "Admin Login",
+        use_container_width=True,
+    ):
+
+        clear_verification_state()
+        clear_recovery_state()
+
+        st.session_state.show_admin_dialog = True
+
+        st.rerun()
+
+    # -----------------------------------------------------
+    # Open exactly one dialog per run
+    # -----------------------------------------------------
 
     if st.session_state.show_existing_dialog:
 
@@ -2260,6 +2649,10 @@ if (
     elif st.session_state.show_recovery_dialog:
 
         recover_household_id_dialog()
+
+    elif st.session_state.show_admin_dialog:
+
+        admin_login_dialog()
 
     st.stop()
 

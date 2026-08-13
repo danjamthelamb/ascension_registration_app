@@ -185,6 +185,13 @@ def init_db() -> None:
         _add_column_if_missing(
             conn,
             "children",
+            "receiving_confirmation",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+
+        _add_column_if_missing(
+            conn,
+            "children",
             "baptism_status",
             "TEXT",
         )
@@ -211,7 +218,7 @@ def init_db() -> None:
         )
 
         # -------------------------------------------------
-        # Verification codes
+        # Household verification codes
         # -------------------------------------------------
 
         conn.execute(
@@ -241,6 +248,37 @@ def init_db() -> None:
             """
             CREATE INDEX IF NOT EXISTS idx_verification_household_id
             ON verification_codes (household_id);
+            """
+        )
+
+        # -------------------------------------------------
+        # Admin verification codes
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS admin_verification_codes (
+                verification_id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+                email TEXT NOT NULL,
+
+                code_hash TEXT NOT NULL,
+                salt TEXT NOT NULL,
+
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                max_attempts INTEGER NOT NULL DEFAULT 5,
+
+                created_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                used_at TEXT
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_admin_verification_email
+            ON admin_verification_codes (email);
             """
         )
 
@@ -368,7 +406,7 @@ def get_household_references_by_email(
 
 
 # ---------------------------------------------------------
-# Create email verification code
+# Create household email verification code
 # ---------------------------------------------------------
 
 def create_household_verification(
@@ -485,7 +523,7 @@ def create_household_verification(
 
 
 # ---------------------------------------------------------
-# Verify email code
+# Verify household email code
 # ---------------------------------------------------------
 
 def verify_household_code(
@@ -493,7 +531,17 @@ def verify_household_code(
     code: str,
 ) -> tuple[bool, str]:
     """
-    Verify a one-time email code.
+    Verify a one-time household email code.
+
+    Possible responses:
+
+        (True, "verified")
+
+        (False, "invalid")
+        (False, "expired")
+        (False, "locked")
+        (False, "no_active_code")
+        (False, "household_not_found")
     """
 
     household_reference = (
@@ -642,6 +690,282 @@ def verify_household_code(
         conn.execute(
             """
             UPDATE verification_codes
+            SET attempt_count = ?
+            WHERE verification_id = ?;
+            """,
+            (
+                new_attempt_count,
+                verification_id,
+            ),
+        )
+
+        return False, "invalid"
+
+
+# ---------------------------------------------------------
+# Create admin verification code
+# ---------------------------------------------------------
+
+def create_admin_verification(
+    email: str,
+) -> dict:
+    """
+    Create a new one-time verification code for
+    an authorized admin email address.
+
+    IMPORTANT:
+    Authorization is handled by the application.
+
+    The app should check the email against the approved
+    admin allowlist in Streamlit secrets BEFORE calling
+    this function.
+
+    Returns:
+
+        {
+            "email": "admin@example.com",
+            "code": "482913",
+            "expires_minutes": 10
+        }
+
+    The plaintext code is returned so the application
+    can email it, but it is NOT stored in SQLite.
+    """
+
+    email = email.strip().lower()
+
+    if not email:
+        raise ValueError(
+            "Admin email cannot be empty."
+        )
+
+    code = _generate_verification_code()
+
+    salt = secrets.token_hex(16)
+
+    code_hash = _hash_verification_code(
+        code,
+        salt,
+    )
+
+    now = datetime.now(timezone.utc)
+
+    expires_at = (
+        now
+        + timedelta(
+            minutes=VERIFICATION_CODE_TTL_MINUTES
+        )
+    )
+
+    now_text = now.isoformat()
+    expires_text = expires_at.isoformat()
+
+    with _connect() as conn:
+
+        # Invalidate any previous unused admin codes
+        # for this email address.
+        conn.execute(
+            """
+            UPDATE admin_verification_codes
+            SET used_at = ?
+            WHERE LOWER(TRIM(email)) = ?
+            AND used_at IS NULL;
+            """,
+            (
+                now_text,
+                email,
+            ),
+        )
+
+        conn.execute(
+            """
+            INSERT INTO admin_verification_codes (
+                email,
+                code_hash,
+                salt,
+                attempt_count,
+                max_attempts,
+                created_at,
+                expires_at,
+                used_at
+            )
+            VALUES (?, ?, ?, 0, ?, ?, ?, NULL);
+            """,
+            (
+                email,
+                code_hash,
+                salt,
+                VERIFICATION_MAX_ATTEMPTS,
+                now_text,
+                expires_text,
+            ),
+        )
+
+    return {
+        "email":
+            email,
+
+        "code":
+            code,
+
+        "expires_minutes":
+            VERIFICATION_CODE_TTL_MINUTES,
+    }
+
+
+# ---------------------------------------------------------
+# Verify admin code
+# ---------------------------------------------------------
+
+def verify_admin_code(
+    email: str,
+    code: str,
+) -> tuple[bool, str]:
+    """
+    Verify a one-time admin login code.
+
+    Possible responses:
+
+        (True, "verified")
+
+        (False, "invalid")
+        (False, "expired")
+        (False, "locked")
+        (False, "no_active_code")
+    """
+
+    email = email.strip().lower()
+    code = code.strip()
+
+    if not email:
+        return False, "no_active_code"
+
+    now = datetime.now(timezone.utc)
+    now_text = now.isoformat()
+
+    with _connect() as conn:
+
+        verification = conn.execute(
+            """
+            SELECT
+                verification_id,
+                code_hash,
+                salt,
+                attempt_count,
+                max_attempts,
+                expires_at
+            FROM admin_verification_codes
+            WHERE LOWER(TRIM(email)) = ?
+            AND used_at IS NULL
+            ORDER BY verification_id DESC
+            LIMIT 1;
+            """,
+            (email,),
+        ).fetchone()
+
+        if verification is None:
+            return False, "no_active_code"
+
+        verification_id = verification[0]
+        stored_hash = verification[1]
+        salt = verification[2]
+        attempt_count = verification[3]
+        max_attempts = verification[4]
+        expires_at_text = verification[5]
+
+        # ---------------------------------------------
+        # Check expiration
+        # ---------------------------------------------
+
+        expires_at = datetime.fromisoformat(
+            expires_at_text
+        )
+
+        if now >= expires_at:
+
+            conn.execute(
+                """
+                UPDATE admin_verification_codes
+                SET used_at = ?
+                WHERE verification_id = ?;
+                """,
+                (
+                    now_text,
+                    verification_id,
+                ),
+            )
+
+            return False, "expired"
+
+        # ---------------------------------------------
+        # Check attempt limit
+        # ---------------------------------------------
+
+        if attempt_count >= max_attempts:
+            return False, "locked"
+
+        # ---------------------------------------------
+        # Compare submitted code
+        # ---------------------------------------------
+
+        submitted_hash = _hash_verification_code(
+            code,
+            salt,
+        )
+
+        code_matches = secrets.compare_digest(
+            stored_hash,
+            submitted_hash,
+        )
+
+        if code_matches:
+
+            # Successful login codes become unusable
+            # immediately.
+            conn.execute(
+                """
+                UPDATE admin_verification_codes
+                SET used_at = ?
+                WHERE verification_id = ?;
+                """,
+                (
+                    now_text,
+                    verification_id,
+                ),
+            )
+
+            return True, "verified"
+
+        # ---------------------------------------------
+        # Incorrect code
+        # ---------------------------------------------
+
+        new_attempt_count = (
+            attempt_count + 1
+        )
+
+        if new_attempt_count >= max_attempts:
+
+            conn.execute(
+                """
+                UPDATE admin_verification_codes
+                SET
+                    attempt_count = ?,
+                    used_at = ?
+                WHERE verification_id = ?;
+                """,
+                (
+                    new_attempt_count,
+                    now_text,
+                    verification_id,
+                ),
+            )
+
+            return False, "locked"
+
+        conn.execute(
+            """
+            UPDATE admin_verification_codes
             SET attempt_count = ?
             WHERE verification_id = ?;
             """,
@@ -950,9 +1274,10 @@ def get_registration_by_reference(
         child[
             "receiving_confirmation"
         ] = bool(
-            child[
-                "receiving_confirmation"
-            ]
+            child.get(
+                "receiving_confirmation",
+                0,
+            )
         )
 
         children.append(

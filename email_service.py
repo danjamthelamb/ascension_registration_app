@@ -99,7 +99,7 @@ def _send_email(
 
 
 # ---------------------------------------------------------
-# Verification code email
+# Household verification code email
 # ---------------------------------------------------------
 
 def send_verification_email(
@@ -134,6 +134,52 @@ This code will expire in {expires_minutes} minutes.
 
 If you did not request access to this household,
 you can ignore this email.
+
+Ascension Catholic Church
+Hurricane, West Virginia
+""".strip()
+
+    _send_email(
+        recipient=recipient,
+        subject=subject,
+        body=body,
+    )
+
+
+# ---------------------------------------------------------
+# Admin verification code email
+# ---------------------------------------------------------
+
+def send_admin_verification_email(
+    recipient: str,
+    verification_code: str,
+    expires_minutes: int = 10,
+) -> None:
+    """
+    Send a one-time admin login code.
+
+    This should only be called after the application
+    has confirmed that the recipient is an approved
+    administrator.
+    """
+
+    subject = (
+        "Ascension Registration Admin Login Code"
+    )
+
+    body = f"""
+Hello,
+
+A request was made to sign in to the Ascension Registration
+administration area.
+
+Your admin login code is:
+
+{verification_code}
+
+This code will expire in {expires_minutes} minutes.
+
+If you did not request this login, you can ignore this email.
 
 Ascension Catholic Church
 Hurricane, West Virginia

@@ -47,8 +47,8 @@ def _connect() -> psycopg.Connection:
 
 def init_db() -> None:
     """
-    Create all application tables, indexes, and
-    standard roster groups if they do not already exist.
+    Create all application tables, indexes, migrations,
+    and standard roster groups if they do not already exist.
 
     Safe to run every time the app starts.
     """
@@ -82,9 +82,49 @@ def init_db() -> None:
                 state TEXT NOT NULL,
                 zip_code TEXT NOT NULL,
 
+                emergency_contact_name
+                    TEXT NOT NULL DEFAULT '',
+
+                emergency_contact_relationship
+                    TEXT NOT NULL DEFAULT '',
+
+                emergency_contact_phone
+                    TEXT NOT NULL DEFAULT '',
+
                 created_at TIMESTAMPTZ NOT NULL
                     DEFAULT CURRENT_TIMESTAMP
             );
+            """
+        )
+
+        # -------------------------------------------------
+        # Household migrations
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            ALTER TABLE households
+            ADD COLUMN IF NOT EXISTS
+                emergency_contact_name
+                TEXT NOT NULL DEFAULT '';
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE households
+            ADD COLUMN IF NOT EXISTS
+                emergency_contact_relationship
+                TEXT NOT NULL DEFAULT '';
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE households
+            ADD COLUMN IF NOT EXISTS
+                emergency_contact_phone
+                TEXT NOT NULL DEFAULT '';
             """
         )
 
@@ -127,7 +167,7 @@ def init_db() -> None:
         )
 
         # -------------------------------------------------
-        # Simple migrations
+        # Child migrations
         # -------------------------------------------------
 
         conn.execute(
@@ -259,8 +299,21 @@ def init_db() -> None:
                 group_key TEXT PRIMARY KEY,
                 display_name TEXT NOT NULL,
                 category TEXT NOT NULL,
-                catechists TEXT NOT NULL DEFAULT ''
+                catechists TEXT NOT NULL DEFAULT '',
+                classroom TEXT NOT NULL DEFAULT ''
             );
+            """
+        )
+
+        # -------------------------------------------------
+        # Roster group migrations
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            ALTER TABLE roster_groups
+            ADD COLUMN IF NOT EXISTS
+                classroom TEXT NOT NULL DEFAULT '';
             """
         )
 
@@ -319,9 +372,10 @@ def init_db() -> None:
                     group_key,
                     display_name,
                     category,
-                    catechists
+                    catechists,
+                    classroom
                 )
-                VALUES (%s, %s, %s, '')
+                VALUES (%s, %s, %s, '', '')
                 ON CONFLICT (group_key)
                 DO NOTHING;
                 """,
@@ -1197,9 +1251,16 @@ def save_registration(
 
                 city,
                 state,
-                zip_code
+                zip_code,
+
+                emergency_contact_name,
+                emergency_contact_relationship,
+                emergency_contact_phone
             )
             VALUES (
+                %s,
+                %s,
+                %s,
                 %s,
                 %s,
                 %s,
@@ -1276,6 +1337,21 @@ def save_registration(
                 household[
                     "zip_code"
                 ],
+
+                household.get(
+                    "emergency_contact_name",
+                    "",
+                ),
+
+                household.get(
+                    "emergency_contact_relationship",
+                    "",
+                ),
+
+                household.get(
+                    "emergency_contact_phone",
+                    "",
+                ),
             ),
         ).fetchone()
 
@@ -1434,10 +1510,6 @@ def get_registration_by_reference(
             ),
         ).fetchall()
 
-    # dict_row already gives us dictionaries.
-    # PostgreSQL DATE values are returned as Python dates
-    # and BOOLEAN values are returned as Python bools.
-
     children = [
         dict(row)
         for row in child_rows
@@ -1463,6 +1535,7 @@ def update_registration(
 
     Handles:
         household changes
+        emergency contact changes
         edited children
         new children
         removed children
@@ -1501,7 +1574,11 @@ def update_registration(
 
                 city = %s,
                 state = %s,
-                zip_code = %s
+                zip_code = %s,
+
+                emergency_contact_name = %s,
+                emergency_contact_relationship = %s,
+                emergency_contact_phone = %s
 
             WHERE household_id = %s;
             """,
@@ -1562,6 +1639,21 @@ def update_registration(
                 household[
                     "zip_code"
                 ],
+
+                household.get(
+                    "emergency_contact_name",
+                    "",
+                ),
+
+                household.get(
+                    "emergency_contact_relationship",
+                    "",
+                ),
+
+                household.get(
+                    "emergency_contact_phone",
+                    "",
+                ),
 
                 household_id,
             ),
@@ -1874,7 +1966,11 @@ def get_admin_roster() -> list[dict]:
 
                 h.city,
                 h.state,
-                h.zip_code
+                h.zip_code,
+
+                h.emergency_contact_name,
+                h.emergency_contact_relationship,
+                h.emergency_contact_phone
 
             FROM children AS c
 
@@ -1918,7 +2014,8 @@ def get_admin_roster() -> list[dict]:
 def get_roster_groups() -> list[dict]:
     """
     Return the standard PSR and Youth Ministry
-    roster groups including editable catechist names.
+    roster groups including editable catechist
+    names and classroom assignments.
     """
 
     group_order = [
@@ -1940,7 +2037,8 @@ def get_roster_groups() -> list[dict]:
                 group_key,
                 display_name,
                 category,
-                catechists
+                catechists,
+                classroom
             FROM roster_groups;
             """
         ).fetchall()
@@ -2004,6 +2102,60 @@ def update_roster_group_catechists(
             """,
             (
                 catechists,
+                group_key,
+            ),
+        )
+
+        if cursor.rowcount == 0:
+
+            raise ValueError(
+                f"Unknown roster group: "
+                f"{group_key}"
+            )
+
+
+# ---------------------------------------------------------
+# Update roster classroom
+# ---------------------------------------------------------
+
+def update_roster_group_classroom(
+    group_key: str,
+    classroom: str,
+) -> None:
+    """
+    Update the classroom assigned to one roster group.
+
+    Example:
+        Room 1 - St. Monica
+    """
+
+    group_key = (
+        group_key
+        .strip()
+        .lower()
+    )
+
+    classroom = (
+        classroom
+        .strip()
+    )
+
+    if not group_key:
+
+        raise ValueError(
+            "Roster group cannot be empty."
+        )
+
+    with _connect() as conn:
+
+        cursor = conn.execute(
+            """
+            UPDATE roster_groups
+            SET classroom = %s
+            WHERE group_key = %s;
+            """,
+            (
+                classroom,
                 group_key,
             ),
         )

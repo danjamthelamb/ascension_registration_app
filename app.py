@@ -1,8 +1,15 @@
-from datetime import date
+from __future__ import annotations
+
+import base64
+import html
 import re
+from datetime import date
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from ui_theme import inject_theme
+
 
 from db import (
     create_admin_verification,
@@ -15,6 +22,7 @@ from db import (
     save_registration,
     update_registration,
     update_roster_group_catechists,
+    update_roster_group_classroom,
     verify_admin_code,
     verify_household_code,
 )
@@ -29,15 +37,432 @@ from email_service import (
 
 
 # ---------------------------------------------------------
+# Paths
+# ---------------------------------------------------------
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+LOGO_PATH = PROJECT_ROOT / "assets" / "ascension_logo.png"
+
+
+# ---------------------------------------------------------
+# App setup
+# ---------------------------------------------------------
+
+st.set_page_config(
+    page_title="Ascension Faith Formation Registration",
+    page_icon="⛪",
+    layout="centered",
+)
+
+inject_theme()
+
+# ---------------------------------------------------------
+# Global styling
+# ---------------------------------------------------------
+
+st.markdown(
+    """
+    <style>
+
+    /* --------------------------------------------------
+       General
+    -------------------------------------------------- */
+
+    .block-container {
+        padding-top: 2rem;
+        padding-bottom: 4rem;
+    }
+
+    /* --------------------------------------------------
+       Keyed cards
+    -------------------------------------------------- */
+
+    .st-key-progress_card,
+    .st-key-household_empty_card,
+    .st-key-household_card,
+    .st-key-children_empty_card,
+    [class*="st-key-child_card_"],
+    .st-key-review_ready_card,
+    .st-key-review_pending_card,
+    .st-key-landing_new_card,
+    .st-key-landing_returning_card,
+    .st-key-completion_household_id_card,
+    .st-key-completion_next_steps_card,
+    .st-key-review_dialog_household_card,
+    [class*="st-key-review_dialog_child_card_"],
+    .st-key-review_dialog_submit_card,
+    [class*="st-key-roster_card_"] {
+        background-color: #FFFDFC !important;
+        border: 1px solid #C2B5A5 !important;
+        border-radius: 12px !important;
+        box-shadow:
+            inset 0 0 0 1px rgba(255, 255, 255, 0.65),
+            0 2px 7px rgba(32, 58, 92, 0.045) !important;
+        overflow: hidden;
+    }
+
+    /* --------------------------------------------------
+       Landing page
+    -------------------------------------------------- */
+
+    .landing-logo {
+        text-align: center;
+        margin-top: 0.25rem;
+        margin-bottom: 1rem;
+    }
+
+    .landing-logo img {
+        width: 125px;
+        max-width: 34vw;
+        height: auto;
+    }
+
+    .landing-parish {
+        text-align: center;
+        font-size: 0.9rem;
+        font-weight: 700;
+        letter-spacing: 0.11em;
+        text-transform: uppercase;
+        opacity: 0.72;
+        margin-bottom: 0.35rem;
+    }
+
+    .landing-title {
+        text-align: center;
+        font-size: 2.35rem;
+        font-weight: 800;
+        line-height: 1.12;
+        letter-spacing: -0.025em;
+        margin-bottom: 0.9rem;
+    }
+
+    .landing-welcome {
+        max-width: 610px;
+        margin: 0 auto 2.2rem auto;
+        text-align: center;
+        font-size: 1.03rem;
+        line-height: 1.6;
+        opacity: 0.78;
+    }
+
+    .landing-section-label {
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        opacity: 0.55;
+        margin-bottom: 0.2rem;
+    }
+
+    .landing-action-title {
+        font-size: 1.08rem;
+        font-weight: 700;
+        margin-bottom: 0.2rem;
+    }
+
+    .landing-action-description {
+        font-size: 0.9rem;
+        line-height: 1.4;
+        opacity: 0.67;
+        margin-bottom: 0.85rem;
+    }
+
+    .landing-recovery {
+        text-align: center;
+        margin-top: 1rem;
+        margin-bottom: -0.4rem;
+        font-size: 0.82rem;
+        opacity: 0.55;
+    }
+
+    .landing-admin {
+        text-align: center;
+        margin-top: 1.3rem;
+        margin-bottom: 0.4rem;
+        font-size: 0.72rem;
+        opacity: 0.45;
+        text-transform: uppercase;
+        letter-spacing: 0.1em;
+    }
+
+    /* --------------------------------------------------
+       Registration workspace
+    -------------------------------------------------- */
+
+    .registration-intro {
+        font-size: 1rem;
+        line-height: 1.55;
+        opacity: 0.75;
+        margin-bottom: 1.2rem;
+    }
+
+    .progress-label {
+        font-size: 0.75rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        opacity: 0.55;
+        margin-bottom: 0.2rem;
+    }
+
+    .progress-title {
+        font-size: 1rem;
+        font-weight: 700;
+        margin-bottom: 0.15rem;
+    }
+
+    .progress-complete {
+        font-size: 0.83rem;
+        font-weight: 600;
+    }
+
+    .progress-waiting {
+        font-size: 0.83rem;
+        opacity: 0.55;
+    }
+
+    .progress-needed {
+        font-size: 0.83rem;
+        font-weight: 600;
+    }
+
+    .section-eyebrow {
+        font-size: 0.76rem;
+        font-weight: 700;
+        text-transform: uppercase;
+        letter-spacing: 0.08em;
+        opacity: 0.5;
+        margin-bottom: 0.2rem;
+    }
+
+    .empty-state-title {
+        font-size: 1.08rem;
+        font-weight: 700;
+        margin-bottom: 0.25rem;
+    }
+
+    .empty-state-copy {
+        font-size: 0.9rem;
+        line-height: 1.5;
+        opacity: 0.68;
+        margin-bottom: 0.9rem;
+    }
+
+    .review-ready-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        margin-bottom: 0.35rem;
+    }
+
+    .review-check {
+        font-size: 0.9rem;
+        line-height: 1.6;
+    }
+
+    .privacy-note {
+        text-align: center;
+        font-size: 0.77rem;
+        line-height: 1.45;
+        opacity: 0.42;
+        margin-top: 2.5rem;
+    }
+
+    /* --------------------------------------------------
+       Review dialog
+    -------------------------------------------------- */
+
+    .review-section-title {
+        font-size: 1.08rem;
+        font-weight: 850;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        margin-top: 0.2rem;
+        margin-bottom: 1rem;
+    }
+
+    .review-person-name {
+        font-size: 1.03rem;
+        font-weight: 750;
+        margin-bottom: 1rem;
+    }
+
+    .review-field-label {
+        font-size: 0.7rem;
+        font-weight: 750;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        opacity: 0.48;
+        margin-bottom: 0.1rem;
+    }
+
+    .review-field-value {
+        font-size: 0.94rem;
+        font-weight: 550;
+        line-height: 1.45;
+        margin-bottom: 1rem;
+    }
+
+    .review-child-name {
+        font-size: 1.02rem;
+        font-weight: 750;
+        margin-bottom: 1rem;
+    }
+
+    .review-submit-title {
+        font-size: 1rem;
+        font-weight: 750;
+        margin-bottom: 0.25rem;
+    }
+
+    .review-submit-copy {
+        font-size: 0.9rem;
+        line-height: 1.5;
+        opacity: 0.68;
+        margin-bottom: 0.75rem;
+    }
+
+    /* --------------------------------------------------
+       Completion screen
+    -------------------------------------------------- */
+
+    .completion-logo {
+        text-align: center;
+        margin-bottom: 1rem;
+    }
+
+    .completion-logo img {
+        width: 105px;
+        max-width: 30vw;
+        height: auto;
+    }
+
+    .completion-kicker {
+        text-align: center;
+        font-size: 0.78rem;
+        font-weight: 700;
+        letter-spacing: 0.09em;
+        text-transform: uppercase;
+        opacity: 0.55;
+        margin-bottom: 0.4rem;
+    }
+
+    .completion-title {
+        text-align: center;
+        font-size: 2rem;
+        font-weight: 800;
+        line-height: 1.15;
+        margin-bottom: 0.65rem;
+    }
+
+    .completion-copy {
+        text-align: center;
+        max-width: 570px;
+        margin: 0 auto 1.75rem auto;
+        font-size: 0.98rem;
+        line-height: 1.55;
+        opacity: 0.72;
+    }
+
+    .household-id-label {
+        text-align: center;
+        font-size: 0.76rem;
+        font-weight: 700;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        opacity: 0.55;
+        margin-bottom: 0.25rem;
+    }
+
+    .household-id-help {
+        text-align: center;
+        font-size: 0.87rem;
+        line-height: 1.5;
+        opacity: 0.65;
+        margin-top: 0.5rem;
+    }
+
+    .next-steps-title {
+        font-size: 1.05rem;
+        font-weight: 700;
+        margin-bottom: 0.55rem;
+    }
+
+    .next-step {
+        font-size: 0.92rem;
+        line-height: 1.65;
+    }
+
+    .completion-footer {
+        text-align: center;
+        margin-top: 2rem;
+        font-size: 0.77rem;
+        opacity: 0.42;
+    }
+
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+init_db()
+
+
+# ---------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------
 
-def calculate_age(date_of_birth: date) -> int:
+def image_to_data_url(path: Path) -> str:
+
+    suffix = path.suffix.lower()
+
+    mime_types = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".webp": "image/webp",
+    }
+
+    mime_type = mime_types.get(
+        suffix,
+        "image/png",
+    )
+
+    encoded = base64.b64encode(
+        path.read_bytes()
+    ).decode("utf-8")
+
+    return (
+        f"data:{mime_type};"
+        f"base64,{encoded}"
+    )
+
+
+def escape_html(value) -> str:
+
+    if value is None:
+        return ""
+
+    return html.escape(
+        str(value)
+    )
+
+
+def calculate_age(
+    date_of_birth: date,
+) -> int:
+
     today = date.today()
 
-    age = today.year - date_of_birth.year
+    age = (
+        today.year
+        - date_of_birth.year
+    )
 
-    if (today.month, today.day) < (
+    if (
+        today.month,
+        today.day,
+    ) < (
         date_of_birth.month,
         date_of_birth.day,
     ):
@@ -46,7 +471,10 @@ def calculate_age(date_of_birth: date) -> int:
     return age
 
 
-def is_valid_email(email: str) -> bool:
+def is_valid_email(
+    email: str,
+) -> bool:
+
     email = email.strip()
 
     pattern = (
@@ -55,13 +483,29 @@ def is_valid_email(email: str) -> bool:
         r"(?:\.[A-Za-z0-9-]+)+$"
     )
 
-    return re.fullmatch(pattern, email) is not None
+    return (
+        re.fullmatch(
+            pattern,
+            email,
+        )
+        is not None
+    )
 
 
-def normalize_phone(phone: str) -> str | None:
-    digits = re.sub(r"\D", "", phone)
+def normalize_phone(
+    phone: str,
+) -> str | None:
 
-    if len(digits) == 11 and digits.startswith("1"):
+    digits = re.sub(
+        r"\D",
+        "",
+        phone,
+    )
+
+    if (
+        len(digits) == 11
+        and digits.startswith("1")
+    ):
         digits = digits[1:]
 
     if len(digits) != 10:
@@ -80,13 +524,22 @@ def normalize_phone(phone: str) -> str | None:
     )
 
 
-def normalize_zip(zip_code: str) -> str | None:
+def normalize_zip(
+    zip_code: str,
+) -> str | None:
+
     zip_code = zip_code.strip()
 
-    if re.fullmatch(r"\d{5}", zip_code):
+    if re.fullmatch(
+        r"\d{5}",
+        zip_code,
+    ):
         return zip_code
 
-    if re.fullmatch(r"\d{9}", zip_code):
+    if re.fullmatch(
+        r"\d{9}",
+        zip_code,
+    ):
         return (
             f"{zip_code[:5]}-"
             f"{zip_code[5:]}"
@@ -101,11 +554,19 @@ def normalize_zip(zip_code: str) -> str | None:
     return None
 
 
-def mask_email(email: str) -> str:
+def mask_email(
+    email: str,
+) -> str:
+
     if "@" not in email:
         return email
 
-    username, domain = email.split("@", 1)
+    username, domain = (
+        email.split(
+            "@",
+            1,
+        )
+    )
 
     if len(username) <= 1:
         masked_username = "•"
@@ -113,61 +574,148 @@ def mask_email(email: str) -> str:
     else:
         masked_username = (
             username[0]
-            + "•" * (len(username) - 1)
+            + "•"
+            * (
+                len(username)
+                - 1
+            )
         )
 
-    return f"{masked_username}@{domain}"
+    return (
+        f"{masked_username}"
+        f"@{domain}"
+    )
+
+
+def household_contact_complete(
+    household: dict | None,
+) -> bool:
+
+    if not household:
+        return False
+
+    required_fields = [
+        "parent_a_first_name",
+        "parent_a_last_name",
+        "parent_a_email",
+        "parent_a_phone",
+        "address_line_1",
+        "city",
+        "state",
+        "zip_code",
+        "emergency_contact_name",
+        "emergency_contact_relationship",
+        "emergency_contact_phone",
+    ]
+
+    return all(
+        str(
+            household.get(
+                field,
+                "",
+            )
+            or ""
+        ).strip()
+
+        for field
+        in required_fields
+    )
 
 
 def get_admin_emails() -> set[str]:
-    try:
-        emails = st.secrets["admins"]["emails"]
 
-    except (KeyError, FileNotFoundError):
+    try:
+
+        emails = (
+            st.secrets[
+                "admins"
+            ][
+                "emails"
+            ]
+        )
+
+    except (
+        KeyError,
+        FileNotFoundError,
+    ):
         return set()
 
-    if isinstance(emails, str):
-        emails = [emails]
+    if isinstance(
+        emails,
+        str,
+    ):
+        emails = [
+            emails
+        ]
 
     return {
-        str(email).strip().lower()
+        str(email)
+        .strip()
+        .lower()
+
         for email in emails
+
         if str(email).strip()
     }
 
 
-def is_authorized_admin(email: str) -> bool:
+def is_authorized_admin(
+    email: str,
+) -> bool:
+
     return (
-        email.strip().lower()
+        email
+        .strip()
+        .lower()
         in get_admin_emails()
     )
 
 
 def clear_verification_state() -> None:
+
     st.session_state.verification_reference = None
     st.session_state.verification_email = None
     st.session_state.show_existing_dialog = False
 
 
 def clear_recovery_state() -> None:
+
     st.session_state.show_recovery_dialog = False
     st.session_state.recovery_request_sent = False
 
 
 def clear_admin_login_state() -> None:
+
     st.session_state.admin_verification_email = None
     st.session_state.show_admin_dialog = False
 
 
 def clear_admin_child_detail() -> None:
-    """
-    Close the current child detail and reset
-    roster-table selection state.
-    """
 
     st.session_state.admin_detail_child_id = None
-
     st.session_state.admin_detail_table_nonce += 1
+
+
+def reset_public_registration_state() -> None:
+
+    st.session_state.household = None
+    st.session_state.children = []
+
+    st.session_state.submitted_household_id = None
+    st.session_state.submitted_household_reference = None
+
+    st.session_state.registration_mode = None
+
+    st.session_state.existing_household_id = None
+    st.session_state.existing_household_reference = None
+
+    st.session_state.confirmation_email_sent = None
+    st.session_state.confirmation_email_address = None
+    st.session_state.confirmation_email_error = None
+
+    clear_verification_state()
+    clear_recovery_state()
+    clear_admin_login_state()
 
 
 def sacrament_status_index(
@@ -182,7 +730,9 @@ def sacrament_status_index(
     ]
 
     if status in options:
-        return options.index(status)
+        return options.index(
+            status
+        )
 
     return 0
 
@@ -197,6 +747,7 @@ def sacrament_preparation_labels(
         "receiving_first_communion_reconciliation",
         False,
     ):
+
         labels.append(
             "First Reconciliation / First Communion"
         )
@@ -205,6 +756,7 @@ def sacrament_preparation_labels(
         "receiving_confirmation",
         False,
     ):
+
         labels.append(
             "Confirmation"
         )
@@ -218,26 +770,34 @@ def sacramental_follow_up_reasons(
 
     reasons = []
 
-    receiving_first_communion = child.get(
-        "receiving_first_communion_reconciliation",
-        False,
+    receiving_first_communion = (
+        child.get(
+            "receiving_first_communion_reconciliation",
+            False,
+        )
     )
 
-    receiving_confirmation = child.get(
-        "receiving_confirmation",
-        False,
+    receiving_confirmation = (
+        child.get(
+            "receiving_confirmation",
+            False,
+        )
     )
 
     baptism_status = child.get(
         "baptism_status"
     )
 
-    first_reconciliation_status = child.get(
-        "first_reconciliation_status"
+    first_reconciliation_status = (
+        child.get(
+            "first_reconciliation_status"
+        )
     )
 
-    first_communion_status = child.get(
-        "first_communion_status"
+    first_communion_status = (
+        child.get(
+            "first_communion_status"
+        )
     )
 
     if receiving_first_communion:
@@ -260,18 +820,25 @@ def sacramental_follow_up_reasons(
             baptism_status != "Yes"
             and baptism_reason not in reasons
         ):
+
             reasons.append(
                 baptism_reason
             )
 
-        if first_reconciliation_status != "Yes":
+        if (
+            first_reconciliation_status
+            != "Yes"
+        ):
 
             reasons.append(
                 "First Reconciliation: "
                 f"{first_reconciliation_status or 'Not provided'}"
             )
 
-        if first_communion_status != "Yes":
+        if (
+            first_communion_status
+            != "Yes"
+        ):
 
             reasons.append(
                 "First Communion: "
@@ -289,12 +856,15 @@ def full_name(
 
     return " ".join(
         part.strip()
+
         for part in [
             first_name or "",
             middle_name or "",
             last_name or "",
         ]
-        if part and part.strip()
+
+        if part
+        and part.strip()
     )
 
 
@@ -305,24 +875,33 @@ def parent_name(
 
     return " ".join(
         part.strip()
+
         for part in [
             first_name or "",
             last_name or "",
         ]
-        if part and part.strip()
+
+        if part
+        and part.strip()
     )
+
+
+def child_grade_label(
+    grade: str,
+) -> str:
+
+    if grade == "Pre-K":
+        return "Pre-K"
+
+    if grade == "K":
+        return "Kindergarten"
+
+    return f"Grade {grade}"
 
 
 def roster_group_key_for_grade(
     grade: str,
 ) -> str | None:
-    """
-    Determine which displayed ministry roster
-    a child belongs to.
-
-    Pre-K and Kindergarten share the
-    Kindergarten roster.
-    """
 
     if grade in (
         "Pre-K",
@@ -363,14 +942,29 @@ def roster_title(
 ) -> str:
 
     titles = {
-        "kindergarten": "Kindergarten",
-        "grade_1": "1st Grade",
-        "grade_2": "2nd Grade",
-        "grade_3": "3rd Grade",
-        "grade_4": "4th Grade",
-        "grade_5": "5th Grade",
-        "edge": "EDGE",
-        "life_teen": "Life Teen",
+        "kindergarten":
+            "Kindergarten",
+
+        "grade_1":
+            "1st Grade",
+
+        "grade_2":
+            "2nd Grade",
+
+        "grade_3":
+            "3rd Grade",
+
+        "grade_4":
+            "4th Grade",
+
+        "grade_5":
+            "5th Grade",
+
+        "edge":
+            "EDGE",
+
+        "life_teen":
+            "Life Teen",
     }
 
     return titles.get(
@@ -383,10 +977,12 @@ def program_name_for_child(
     child: dict,
 ) -> str:
 
-    group_key = roster_group_key_for_grade(
-        child.get(
-            "grade",
-            "",
+    group_key = (
+        roster_group_key_for_grade(
+            child.get(
+                "grade",
+                "",
+            )
         )
     )
 
@@ -405,12 +1001,20 @@ def build_export_dataframe(
 
     rows = []
 
-    for child in children:
+    for child_index, child in enumerate(
+        children
+    ):
 
         child_name = full_name(
-            child.get("first_name"),
-            child.get("middle_name"),
-            child.get("last_name"),
+            child.get(
+                "first_name"
+            ),
+            child.get(
+                "middle_name"
+            ),
+            child.get(
+                "last_name"
+            ),
         )
 
         parent_a = parent_name(
@@ -457,7 +1061,8 @@ def build_export_dataframe(
                 "Middle Name":
                     child.get(
                         "middle_name"
-                    ) or "",
+                    )
+                    or "",
 
                 "Last Name":
                     child.get(
@@ -512,12 +1117,14 @@ def build_export_dataframe(
                 "Parent B Email":
                     child.get(
                         "parent_b_email"
-                    ) or "",
+                    )
+                    or "",
 
                 "Parent B Phone":
                     child.get(
                         "parent_b_phone"
-                    ) or "",
+                    )
+                    or "",
 
                 "Address Line 1":
                     child.get(
@@ -528,7 +1135,8 @@ def build_export_dataframe(
                 "Address Line 2":
                     child.get(
                         "address_line_2"
-                    ) or "",
+                    )
+                    or "",
 
                 "City":
                     child.get(
@@ -545,6 +1153,24 @@ def build_export_dataframe(
                 "ZIP":
                     child.get(
                         "zip_code",
+                        "",
+                    ),
+
+                "Emergency Contact":
+                    child.get(
+                        "emergency_contact_name",
+                        "",
+                    ),
+
+                "Emergency Contact Relationship":
+                    child.get(
+                        "emergency_contact_relationship",
+                        "",
+                    ),
+
+                "Emergency Contact Phone":
+                    child.get(
+                        "emergency_contact_phone",
                         "",
                     ),
 
@@ -572,17 +1198,20 @@ def build_export_dataframe(
                 "Baptism Status":
                     child.get(
                         "baptism_status"
-                    ) or "",
+                    )
+                    or "",
 
                 "First Reconciliation Status":
                     child.get(
                         "first_reconciliation_status"
-                    ) or "",
+                    )
+                    or "",
 
                 "First Communion Status":
                     child.get(
                         "first_communion_status"
-                    ) or "",
+                    )
+                    or "",
 
                 "Sacramental Follow-up":
                     (
@@ -604,20 +1233,7 @@ def build_export_dataframe(
 
 
 # ---------------------------------------------------------
-# App setup
-# ---------------------------------------------------------
-
-st.set_page_config(
-    page_title="Ascension Registration",
-    page_icon="⛪",
-    layout="centered",
-)
-
-init_db()
-
-
-# ---------------------------------------------------------
-# Registration session state
+# Session state
 # ---------------------------------------------------------
 
 if "household" not in st.session_state:
@@ -641,11 +1257,6 @@ if "existing_household_id" not in st.session_state:
 if "existing_household_reference" not in st.session_state:
     st.session_state.existing_household_reference = None
 
-
-# ---------------------------------------------------------
-# Household verification state
-# ---------------------------------------------------------
-
 if "verification_reference" not in st.session_state:
     st.session_state.verification_reference = None
 
@@ -655,21 +1266,11 @@ if "verification_email" not in st.session_state:
 if "show_existing_dialog" not in st.session_state:
     st.session_state.show_existing_dialog = False
 
-
-# ---------------------------------------------------------
-# Recovery state
-# ---------------------------------------------------------
-
 if "show_recovery_dialog" not in st.session_state:
     st.session_state.show_recovery_dialog = False
 
 if "recovery_request_sent" not in st.session_state:
     st.session_state.recovery_request_sent = False
-
-
-# ---------------------------------------------------------
-# Admin state
-# ---------------------------------------------------------
 
 if "show_admin_dialog" not in st.session_state:
     st.session_state.show_admin_dialog = False
@@ -689,11 +1290,6 @@ if "admin_detail_child_id" not in st.session_state:
 if "admin_detail_table_nonce" not in st.session_state:
     st.session_state.admin_detail_table_nonce = 0
 
-
-# ---------------------------------------------------------
-# Confirmation email state
-# ---------------------------------------------------------
-
 if "confirmation_email_sent" not in st.session_state:
     st.session_state.confirmation_email_sent = None
 
@@ -711,15 +1307,18 @@ if "confirmation_email_error" not in st.session_state:
 @st.dialog("Admin Login")
 def admin_login_dialog():
 
-    if st.session_state.admin_verification_email is None:
+    if (
+        st.session_state.admin_verification_email
+        is None
+    ):
 
         st.write(
-            "Enter your authorized administrator "
-            "email address."
+            "Enter your authorized staff email address "
+            "to receive a login code."
         )
 
         admin_email = st.text_input(
-            "Admin Email",
+            "Email",
             placeholder="name@example.com",
         )
 
@@ -738,9 +1337,8 @@ def admin_login_dialog():
             if not admin_email:
 
                 st.error(
-                    "Please enter your email address."
+                    "Please enter your email address to continue."
                 )
-
                 return
 
             if not is_valid_email(
@@ -750,7 +1348,6 @@ def admin_login_dialog():
                 st.error(
                     "Please enter a valid email address."
                 )
-
                 return
 
             try:
@@ -770,15 +1367,18 @@ def admin_login_dialog():
                     )
 
                     send_admin_verification_email(
-                        recipient=verification["email"],
-                        verification_code=verification["code"],
+                        recipient=verification[
+                            "email"
+                        ],
+                        verification_code=verification[
+                            "code"
+                        ],
                         expires_minutes=verification[
                             "expires_minutes"
                         ],
                     )
 
                 st.session_state.show_admin_dialog = True
-
                 st.rerun()
 
             except Exception:
@@ -786,8 +1386,8 @@ def admin_login_dialog():
                 st.session_state.admin_verification_email = None
 
                 st.error(
-                    "We couldn't process the login request "
-                    "right now. Please try again."
+                    "We couldn't send a login code right now. "
+                    "Please wait a moment and try again."
                 )
 
         return
@@ -797,12 +1397,12 @@ def admin_login_dialog():
     )
 
     st.success(
-        "Login request received."
+        "Check your email."
     )
 
     st.write(
-        "If this email address is authorized, "
-        "a 6-digit login code has been sent to:"
+        "If this address is authorized for staff access, "
+        "we sent a 6-digit login code to:"
     )
 
     st.write(
@@ -813,10 +1413,12 @@ def admin_login_dialog():
         "The code expires in 10 minutes."
     )
 
-    verification_code = st.text_input(
-        "Admin Login Code",
-        max_chars=6,
-        placeholder="123456",
+    verification_code = (
+        st.text_input(
+            "Login Code",
+            max_chars=6,
+            placeholder="123456",
+        )
     )
 
     if st.button(
@@ -828,14 +1430,15 @@ def admin_login_dialog():
         if not verification_code.strip():
 
             st.error(
-                "Please enter the login code."
+                "Please enter the 6-digit login code."
             )
-
             return
 
-        verified, status = verify_admin_code(
-            admin_email,
-            verification_code,
+        verified, status = (
+            verify_admin_code(
+                admin_email,
+                verification_code,
+            )
         )
 
         if not verified:
@@ -844,27 +1447,28 @@ def admin_login_dialog():
 
                 st.error(
                     "That login code has expired. "
-                    "Please request a new one."
+                    "Send yourself a new code to continue."
                 )
 
             elif status == "locked":
 
                 st.error(
-                    "Too many incorrect attempts. "
-                    "Please request a new code."
+                    "Too many incorrect attempts were made with "
+                    "that code. Please request a new one."
                 )
 
             elif status == "no_active_code":
 
                 st.error(
-                    "That code is invalid or "
-                    "no longer active."
+                    "That login code is no longer active. "
+                    "Please request a new one."
                 )
 
             else:
 
                 st.error(
-                    "That login code is incorrect."
+                    "That code doesn't match. "
+                    "Please check the email and try again."
                 )
 
             return
@@ -876,16 +1480,14 @@ def admin_login_dialog():
             clear_admin_login_state()
 
             st.error(
-                "Administrator access is not authorized."
+                "Staff access could not be verified."
             )
-
             return
 
         st.session_state.admin_authenticated = True
         st.session_state.admin_email = admin_email
 
         clear_admin_login_state()
-
         st.rerun()
 
     st.divider()
@@ -908,23 +1510,27 @@ def admin_login_dialog():
                 )
 
                 send_admin_verification_email(
-                    recipient=verification["email"],
-                    verification_code=verification["code"],
+                    recipient=verification[
+                        "email"
+                    ],
+                    verification_code=verification[
+                        "code"
+                    ],
                     expires_minutes=verification[
                         "expires_minutes"
                     ],
                 )
 
             st.success(
-                "If this email address is authorized, "
+                "If this address is authorized for staff access, "
                 "a new login code has been sent."
             )
 
         except Exception:
 
             st.error(
-                "We couldn't process the request "
-                "right now. Please try again."
+                "We couldn't send a new login code right now. "
+                "Please wait a moment and try again."
             )
 
     if st.button(
@@ -934,7 +1540,6 @@ def admin_login_dialog():
 
         st.session_state.admin_verification_email = None
         st.session_state.show_admin_dialog = True
-
         st.rerun()
 
 
@@ -973,9 +1578,7 @@ def edit_catechists_dialog(
             "catechists",
             "",
         ),
-        placeholder=(
-            "Jane Smith, John Doe"
-        ),
+        placeholder="Jane Smith, John Doe",
         key=(
             f"catechists_input_"
             f"{group_key}"
@@ -1001,11 +1604,11 @@ def edit_catechists_dialog(
 
             st.rerun()
 
-        except Exception as exc:
+        except Exception:
 
             st.error(
-                "Catechists could not be saved: "
-                f"{exc}"
+                "We couldn't save the catechist names right now. "
+                "Please try again."
             )
 
 
@@ -1040,28 +1643,29 @@ def admin_child_detail_dialog(
         ]
     )
 
-    program = program_name_for_child(
-        child
+    program = (
+        program_name_for_child(
+            child
+        )
     )
-
-    # -----------------------------------------------------
-    # Child
-    # -----------------------------------------------------
 
     st.subheader(
         child_name
     )
 
     st.write(
-        f"**Grade:** {child['grade']}"
+        f"**Grade:** "
+        f"{child['grade']}"
     )
 
     st.write(
-        f"**Program:** {program}"
+        f"**Program:** "
+        f"{program}"
     )
 
     st.write(
-        f"**School:** {child['school']}"
+        f"**School:** "
+        f"{child['school']}"
     )
 
     st.write(
@@ -1071,10 +1675,6 @@ def admin_child_detail_dialog(
     )
 
     st.divider()
-
-    # -----------------------------------------------------
-    # Household
-    # -----------------------------------------------------
 
     st.subheader(
         "Household"
@@ -1091,10 +1691,6 @@ def admin_child_detail_dialog(
         ),
         language=None,
     )
-
-    # -----------------------------------------------------
-    # Parent A
-    # -----------------------------------------------------
 
     parent_a = parent_name(
         child.get(
@@ -1126,10 +1722,6 @@ def admin_child_detail_dialog(
             "",
         )
     )
-
-    # -----------------------------------------------------
-    # Parent B
-    # -----------------------------------------------------
 
     parent_b = parent_name(
         child.get(
@@ -1167,26 +1759,19 @@ def admin_child_detail_dialog(
         )
 
         if parent_b:
-
             st.write(
                 parent_b
             )
 
         if parent_b_email:
-
             st.write(
                 parent_b_email
             )
 
         if parent_b_phone:
-
             st.write(
                 parent_b_phone
             )
-
-    # -----------------------------------------------------
-    # Address
-    # -----------------------------------------------------
 
     st.write("")
 
@@ -1219,9 +1804,45 @@ def admin_child_detail_dialog(
 
     st.divider()
 
-    # -----------------------------------------------------
-    # Sacrament preparation
-    # -----------------------------------------------------
+    st.subheader(
+        "Emergency Contact"
+    )
+
+    emergency_name = (
+        child.get(
+            "emergency_contact_name"
+        )
+        or "Not provided"
+    )
+
+    emergency_relationship = (
+        child.get(
+            "emergency_contact_relationship"
+        )
+        or "Not provided"
+    )
+
+    emergency_phone = (
+        child.get(
+            "emergency_contact_phone"
+        )
+        or "Not provided"
+    )
+
+    st.write(
+        f"**Name:** {emergency_name}"
+    )
+
+    st.write(
+        f"**Relationship:** "
+        f"{emergency_relationship}"
+    )
+
+    st.write(
+        f"**Phone:** {emergency_phone}"
+    )
+
+    st.divider()
 
     st.subheader(
         "Sacrament Preparation"
@@ -1246,10 +1867,6 @@ def admin_child_detail_dialog(
         st.caption(
             "No sacrament preparation selected."
         )
-
-    # -----------------------------------------------------
-    # Sacramental history
-    # -----------------------------------------------------
 
     st.subheader(
         "Sacramental History"
@@ -1277,7 +1894,8 @@ def admin_child_detail_dialog(
     )
 
     st.write(
-        f"**Baptized:** {baptism}"
+        f"**Baptized:** "
+        f"{baptism}"
     )
 
     st.write(
@@ -1289,10 +1907,6 @@ def admin_child_detail_dialog(
         f"**First Communion:** "
         f"{communion}"
     )
-
-    # -----------------------------------------------------
-    # Follow-up
-    # -----------------------------------------------------
 
     follow_up_reasons = (
         sacramental_follow_up_reasons(
@@ -1306,7 +1920,8 @@ def admin_child_detail_dialog(
             "**Sacramental follow-up needed**\n\n"
             + "\n\n".join(
                 f"• {reason}"
-                for reason in follow_up_reasons
+                for reason
+                in follow_up_reasons
             )
         )
 
@@ -1319,7 +1934,6 @@ def admin_child_detail_dialog(
     ):
 
         clear_admin_child_detail()
-
         st.rerun()
 
 
@@ -1330,16 +1944,18 @@ def admin_child_detail_dialog(
 @st.dialog("Recover Household ID")
 def recover_household_id_dialog():
 
-    if st.session_state.recovery_request_sent:
+    if (
+        st.session_state.recovery_request_sent
+    ):
 
         st.success(
-            "Recovery request received."
+            "Check your email."
         )
 
         st.write(
-            "If that email address is associated with an "
-            "Ascension registration, the Household ID has "
-            "been sent to it."
+            "If that email address is connected to an "
+            "Ascension registration, we've sent the "
+            "Household ID associated with it."
         )
 
         st.caption(
@@ -1355,9 +1971,7 @@ def recover_household_id_dialog():
         ):
 
             clear_recovery_state()
-
             st.session_state.show_existing_dialog = True
-
             st.rerun()
 
         if st.button(
@@ -1366,7 +1980,6 @@ def recover_household_id_dialog():
         ):
 
             clear_recovery_state()
-
             st.rerun()
 
         return
@@ -1399,7 +2012,6 @@ def recover_household_id_dialog():
             st.error(
                 "Please enter your email address."
             )
-
             return
 
         if not is_valid_email(
@@ -1409,7 +2021,6 @@ def recover_household_id_dialog():
             st.error(
                 "Please enter a valid email address."
             )
-
             return
 
         try:
@@ -1429,14 +2040,13 @@ def recover_household_id_dialog():
 
             st.session_state.recovery_request_sent = True
             st.session_state.show_recovery_dialog = True
-
             st.rerun()
 
         except Exception:
 
             st.error(
-                "We couldn't process the recovery request "
-                "right now. Please try again."
+                "We couldn't process the recovery request right now. "
+                "Please wait a moment and try again."
             )
 
 
@@ -1447,16 +2057,21 @@ def recover_household_id_dialog():
 @st.dialog("Return to Existing Household")
 def existing_household_dialog():
 
-    if st.session_state.verification_reference is None:
+    if (
+        st.session_state.verification_reference
+        is None
+    ):
 
         st.write(
-            "Enter the Household ID from your "
-            "previous registration."
+            "Enter your Household ID to securely access "
+            "your existing registration."
         )
 
-        household_reference = st.text_input(
-            "Household ID",
-            placeholder="ASC-XXXXXX",
+        household_reference = (
+            st.text_input(
+                "Household ID",
+                placeholder="ASC-XXXXXX",
+            )
         )
 
         if st.button(
@@ -1470,7 +2085,6 @@ def existing_household_dialog():
                 st.error(
                     "Please enter your Household ID."
                 )
-
                 return
 
             try:
@@ -1484,15 +2098,18 @@ def existing_household_dialog():
                 if verification is None:
 
                     st.error(
-                        "We couldn't find a household "
-                        "with that ID."
+                        "We couldn't find a registration with that "
+                        "Household ID. Please check it and try again."
                     )
-
                     return
 
                 send_verification_email(
-                    recipient=verification["email"],
-                    verification_code=verification["code"],
+                    recipient=verification[
+                        "email"
+                    ],
+                    verification_code=verification[
+                        "code"
+                    ],
                     household_reference=verification[
                         "household_reference"
                     ],
@@ -1514,14 +2131,13 @@ def existing_household_dialog():
                 )
 
                 st.session_state.show_existing_dialog = True
-
                 st.rerun()
 
-            except Exception as exc:
+            except Exception:
 
                 st.error(
-                    "We couldn't send the verification "
-                    f"email: {exc}"
+                    "We couldn't send the verification code right now. "
+                    "Please wait a moment and try again."
                 )
 
         st.divider()
@@ -1532,9 +2148,7 @@ def existing_household_dialog():
         ):
 
             clear_verification_state()
-
             st.session_state.show_recovery_dialog = True
-
             st.rerun()
 
         return
@@ -1548,7 +2162,7 @@ def existing_household_dialog():
     )
 
     st.success(
-        "Verification code sent."
+        "Check your email."
     )
 
     st.write(
@@ -1563,10 +2177,12 @@ def existing_household_dialog():
         "The code expires in 10 minutes."
     )
 
-    verification_code = st.text_input(
-        "Verification Code",
-        max_chars=6,
-        placeholder="123456",
+    verification_code = (
+        st.text_input(
+            "Verification Code",
+            max_chars=6,
+            placeholder="123456",
+        )
     )
 
     if st.button(
@@ -1578,14 +2194,15 @@ def existing_household_dialog():
         if not verification_code.strip():
 
             st.error(
-                "Please enter the verification code."
+                "Please enter the 6-digit verification code."
             )
-
             return
 
-        verified, status = verify_household_code(
-            household_reference,
-            verification_code,
+        verified, status = (
+            verify_household_code(
+                household_reference,
+                verification_code,
+            )
         )
 
         if not verified:
@@ -1594,47 +2211,51 @@ def existing_household_dialog():
 
                 st.error(
                     "That verification code has expired. "
-                    "Please request a new one."
+                    "Send yourself a new code to continue."
                 )
 
             elif status == "locked":
 
                 st.error(
-                    "Too many incorrect attempts. "
-                    "Please request a new code."
+                    "Too many incorrect attempts were made with "
+                    "that code. Please request a new one."
                 )
 
             elif status == "no_active_code":
 
                 st.error(
-                    "There is no active verification code. "
+                    "That verification code is no longer active. "
                     "Please request a new one."
                 )
 
             else:
 
                 st.error(
-                    "That verification code is incorrect."
+                    "That code doesn't match. "
+                    "Please check the email and try again."
                 )
 
             return
 
-        result = get_registration_by_reference(
-            household_reference
+        result = (
+            get_registration_by_reference(
+                household_reference
+            )
         )
 
         if result is None:
 
             st.error(
-                "The household could not be loaded."
+                "We verified your code, but couldn't load the "
+                "registration right now. Please try again."
             )
-
             return
 
-        household, children = result
+        household, children = (
+            result
+        )
 
         st.session_state.household = {
-
             "parent_a_first_name":
                 household[
                     "parent_a_first_name"
@@ -1658,22 +2279,26 @@ def existing_household_dialog():
             "parent_b_first_name":
                 household[
                     "parent_b_first_name"
-                ] or "",
+                ]
+                or "",
 
             "parent_b_last_name":
                 household[
                     "parent_b_last_name"
-                ] or "",
+                ]
+                or "",
 
             "parent_b_email":
                 household[
                     "parent_b_email"
-                ] or "",
+                ]
+                or "",
 
             "parent_b_phone":
                 household[
                     "parent_b_phone"
-                ] or "",
+                ]
+                or "",
 
             "address_line_1":
                 household[
@@ -1683,7 +2308,8 @@ def existing_household_dialog():
             "address_line_2":
                 household[
                     "address_line_2"
-                ] or "",
+                ]
+                or "",
 
             "city":
                 household[
@@ -1699,6 +2325,24 @@ def existing_household_dialog():
                 household[
                     "zip_code"
                 ],
+
+            "emergency_contact_name":
+                household.get(
+                    "emergency_contact_name"
+                )
+                or "",
+
+            "emergency_contact_relationship":
+                household.get(
+                    "emergency_contact_relationship"
+                )
+                or "",
+
+            "emergency_contact_phone":
+                household.get(
+                    "emergency_contact_phone"
+                )
+                or "",
         }
 
         st.session_state.children = children
@@ -1743,14 +2387,18 @@ def existing_household_dialog():
             if verification is None:
 
                 st.error(
-                    "The household could not be found."
+                    "We couldn't find that household registration. "
+                    "Please return and check the Household ID."
                 )
-
                 return
 
             send_verification_email(
-                recipient=verification["email"],
-                verification_code=verification["code"],
+                recipient=verification[
+                    "email"
+                ],
+                verification_code=verification[
+                    "code"
+                ],
                 household_reference=verification[
                     "household_reference"
                 ],
@@ -1766,14 +2414,14 @@ def existing_household_dialog():
             )
 
             st.success(
-                "A new verification code was sent."
+                "A new verification code has been sent."
             )
 
-        except Exception as exc:
+        except Exception:
 
             st.error(
-                "We couldn't send a new verification "
-                f"code: {exc}"
+                "We couldn't send a new verification code right now. "
+                "Please wait a moment and try again."
             )
 
     if st.button(
@@ -1784,7 +2432,6 @@ def existing_household_dialog():
         st.session_state.verification_reference = None
         st.session_state.verification_email = None
         st.session_state.show_existing_dialog = True
-
         st.rerun()
 
 
@@ -1805,6 +2452,10 @@ def household_dialog():
         enter_to_submit=False,
     ):
 
+        # -------------------------------------------------
+        # Parent / Guardian A
+        # -------------------------------------------------
+
         st.subheader(
             "Parent / Guardian A"
         )
@@ -1817,47 +2468,59 @@ def household_dialog():
 
         with col1:
 
-            parent_a_first_name = st.text_input(
-                "First name",
-                value=household.get(
-                    "parent_a_first_name",
-                    "",
-                ),
+            parent_a_first_name = (
+                st.text_input(
+                    "First name",
+                    value=household.get(
+                        "parent_a_first_name",
+                        "",
+                    ),
+                )
             )
 
         with col2:
 
-            parent_a_last_name = st.text_input(
-                "Last name",
-                value=household.get(
-                    "parent_a_last_name",
-                    "",
-                ),
+            parent_a_last_name = (
+                st.text_input(
+                    "Last name",
+                    value=household.get(
+                        "parent_a_last_name",
+                        "",
+                    ),
+                )
             )
 
         col1, col2 = st.columns(2)
 
         with col1:
 
-            parent_a_email = st.text_input(
-                "Email",
-                value=household.get(
-                    "parent_a_email",
-                    "",
-                ),
+            parent_a_email = (
+                st.text_input(
+                    "Email",
+                    value=household.get(
+                        "parent_a_email",
+                        "",
+                    ),
+                )
             )
 
         with col2:
 
-            parent_a_phone = st.text_input(
-                "Phone",
-                value=household.get(
-                    "parent_a_phone",
-                    "",
-                ),
+            parent_a_phone = (
+                st.text_input(
+                    "Phone",
+                    value=household.get(
+                        "parent_a_phone",
+                        "",
+                    ),
+                )
             )
 
         st.divider()
+
+        # -------------------------------------------------
+        # Parent / Guardian B
+        # -------------------------------------------------
 
         st.subheader(
             "Parent / Guardian B"
@@ -1871,76 +2534,98 @@ def household_dialog():
 
         with col1:
 
-            parent_b_first_name = st.text_input(
-                "First name",
-                value=household.get(
-                    "parent_b_first_name",
-                    "",
-                ),
-                key="parent_b_first_name",
+            parent_b_first_name = (
+                st.text_input(
+                    "First name",
+                    value=household.get(
+                        "parent_b_first_name",
+                        "",
+                    ),
+                    key="parent_b_first_name",
+                )
             )
 
         with col2:
 
-            parent_b_last_name = st.text_input(
-                "Last name",
-                value=household.get(
-                    "parent_b_last_name",
-                    "",
-                ),
-                key="parent_b_last_name",
+            parent_b_last_name = (
+                st.text_input(
+                    "Last name",
+                    value=household.get(
+                        "parent_b_last_name",
+                        "",
+                    ),
+                    key="parent_b_last_name",
+                )
             )
 
         col1, col2 = st.columns(2)
 
         with col1:
 
-            parent_b_email = st.text_input(
-                "Email",
-                value=household.get(
-                    "parent_b_email",
-                    "",
-                ),
-                key="parent_b_email",
+            parent_b_email = (
+                st.text_input(
+                    "Email",
+                    value=household.get(
+                        "parent_b_email",
+                        "",
+                    ),
+                    key="parent_b_email",
+                )
             )
 
         with col2:
 
-            parent_b_phone = st.text_input(
-                "Phone",
-                value=household.get(
-                    "parent_b_phone",
-                    "",
-                ),
-                key="parent_b_phone",
+            parent_b_phone = (
+                st.text_input(
+                    "Phone",
+                    value=household.get(
+                        "parent_b_phone",
+                        "",
+                    ),
+                    key="parent_b_phone",
+                )
             )
 
         st.divider()
+
+        # -------------------------------------------------
+        # Home Address
+        # -------------------------------------------------
 
         st.subheader(
             "Home Address"
         )
 
-        address_line_1 = st.text_input(
-            "Street address",
-            value=household.get(
-                "address_line_1",
-                "",
-            ),
-        )
-
-        address_line_2 = st.text_input(
-            "Apartment, unit, etc.",
-            value=household.get(
-                "address_line_2",
-                "",
-            ),
-        )
-
-        city_col, state_col, zip_col = (
-            st.columns(
-                [2, 1, 1]
+        address_line_1 = (
+            st.text_input(
+                "Street address",
+                value=household.get(
+                    "address_line_1",
+                    "",
+                ),
             )
+        )
+
+        address_line_2 = (
+            st.text_input(
+                "Apartment, unit, etc.",
+                value=household.get(
+                    "address_line_2",
+                    "",
+                ),
+            )
+        )
+
+        (
+            city_col,
+            state_col,
+            zip_col,
+        ) = st.columns(
+            [
+                2,
+                1,
+                1,
+            ]
         )
 
         with city_col:
@@ -1966,24 +2651,83 @@ def household_dialog():
 
         with zip_col:
 
-            zip_code = st.text_input(
-                "ZIP",
+            zip_code = (
+                st.text_input(
+                    "ZIP",
+                    value=household.get(
+                        "zip_code",
+                        "",
+                    ),
+                )
+            )
+
+        st.divider()
+
+        # -------------------------------------------------
+        # Emergency Contact
+        # -------------------------------------------------
+
+        st.subheader(
+            "Emergency Contact"
+        )
+
+        st.caption(
+            "Please provide someone other than the parents "
+            "or guardians listed above who we may contact "
+            "if we're unable to reach you."
+        )
+
+        emergency_contact_name = (
+            st.text_input(
+                "Emergency contact name",
                 value=household.get(
-                    "zip_code",
+                    "emergency_contact_name",
                     "",
                 ),
             )
+        )
 
-        submitted = st.form_submit_button(
-            "Save Household",
-            type="primary",
-            use_container_width=True,
+        (
+            emergency_relationship_col,
+            emergency_phone_col,
+        ) = st.columns(2)
+
+        with emergency_relationship_col:
+
+            emergency_contact_relationship = (
+                st.text_input(
+                    "Relationship",
+                    value=household.get(
+                        "emergency_contact_relationship",
+                        "",
+                    ),
+                    placeholder="Grandparent, aunt, family friend...",
+                )
+            )
+
+        with emergency_phone_col:
+
+            emergency_contact_phone = (
+                st.text_input(
+                    "Emergency contact phone",
+                    value=household.get(
+                        "emergency_contact_phone",
+                        "",
+                    ),
+                )
+            )
+
+        submitted = (
+            st.form_submit_button(
+                "Save Household",
+                type="primary",
+                use_container_width=True,
+            )
         )
 
         if submitted:
 
             required_fields = {
-
                 "Parent / Guardian A first name":
                     parent_a_first_name,
 
@@ -2007,22 +2751,35 @@ def household_dialog():
 
                 "ZIP":
                     zip_code,
+
+                "Emergency contact name":
+                    emergency_contact_name,
+
+                "Emergency contact relationship":
+                    emergency_contact_relationship,
+
+                "Emergency contact phone":
+                    emergency_contact_phone,
             }
 
             missing = [
                 name
+
                 for name, value
                 in required_fields.items()
+
                 if not value.strip()
             ]
 
             if missing:
 
                 st.error(
-                    "Please complete all required "
-                    "household information."
+                    "Please complete: "
+                    + ", ".join(
+                        missing
+                    )
+                    + "."
                 )
-
                 return
 
             if not is_valid_email(
@@ -2033,7 +2790,6 @@ def household_dialog():
                     "Please enter a valid email address "
                     "for Parent / Guardian A."
                 )
-
                 return
 
             if (
@@ -2047,7 +2803,6 @@ def household_dialog():
                     "Please enter a valid email address "
                     "for Parent / Guardian B."
                 )
-
                 return
 
             parent_a_phone_formatted = (
@@ -2062,10 +2817,9 @@ def household_dialog():
             ):
 
                 st.error(
-                    "Please enter a valid 10-digit "
-                    "phone number for Parent / Guardian A."
+                    "Please enter a valid 10-digit phone number "
+                    "for Parent / Guardian A."
                 )
-
                 return
 
             parent_b_phone_formatted = None
@@ -2084,11 +2838,27 @@ def household_dialog():
                 ):
 
                     st.error(
-                        "Please enter a valid 10-digit "
-                        "phone number for Parent / Guardian B."
+                        "Please enter a valid 10-digit phone number "
+                        "for Parent / Guardian B."
                     )
-
                     return
+
+            emergency_phone_formatted = (
+                normalize_phone(
+                    emergency_contact_phone
+                )
+            )
+
+            if (
+                emergency_phone_formatted
+                is None
+            ):
+
+                st.error(
+                    "Please enter a valid 10-digit phone number "
+                    "for the emergency contact."
+                )
+                return
 
             zip_code_formatted = (
                 normalize_zip(
@@ -2096,17 +2866,21 @@ def household_dialog():
                 )
             )
 
-            if zip_code_formatted is None:
+            if (
+                zip_code_formatted
+                is None
+            ):
 
                 st.error(
-                    "Please enter a valid ZIP code "
+                    "Please enter a valid ZIP code, "
                     "such as 25033 or 25033-1234."
                 )
-
                 return
 
             state_formatted = (
-                state.strip().upper()
+                state
+                .strip()
+                .upper()
             )
 
             if not re.fullmatch(
@@ -2115,14 +2889,12 @@ def household_dialog():
             ):
 
                 st.error(
-                    "Please enter a valid two-letter "
-                    "state abbreviation."
+                    "Please enter the two-letter state abbreviation, "
+                    "such as WV."
                 )
-
                 return
 
             st.session_state.household = {
-
                 "parent_a_first_name":
                     parent_a_first_name.strip(),
 
@@ -2145,7 +2917,8 @@ def household_dialog():
                     parent_b_email.strip(),
 
                 "parent_b_phone":
-                    parent_b_phone_formatted or "",
+                    parent_b_phone_formatted
+                    or "",
 
                 "address_line_1":
                     address_line_1.strip(),
@@ -2161,6 +2934,15 @@ def household_dialog():
 
                 "zip_code":
                     zip_code_formatted,
+
+                "emergency_contact_name":
+                    emergency_contact_name.strip(),
+
+                "emergency_contact_relationship":
+                    emergency_contact_relationship.strip(),
+
+                "emergency_contact_phone":
+                    emergency_phone_formatted,
             }
 
             st.rerun()
@@ -2176,7 +2958,8 @@ def child_dialog(
 ):
 
     editing = (
-        child_index is not None
+        child_index
+        is not None
     )
 
     if editing:
@@ -2196,9 +2979,11 @@ def child_dialog(
         or {}
     )
 
-    default_last_name = household.get(
-        "parent_a_last_name",
-        "",
+    default_last_name = (
+        household.get(
+            "parent_a_last_name",
+            "",
+        )
     )
 
     grades = [
@@ -2219,15 +3004,19 @@ def child_dialog(
         "12",
     ]
 
-    existing_grade = child.get(
-        "grade",
-        "Select grade",
+    existing_grade = (
+        child.get(
+            "grade",
+            "Select grade",
+        )
     )
 
     try:
 
-        grade_index = grades.index(
-            existing_grade
+        grade_index = (
+            grades.index(
+                existing_grade
+            )
         )
 
     except ValueError:
@@ -2249,39 +3038,47 @@ def child_dialog(
 
     with col1:
 
-        first_name = st.text_input(
-            "First name",
-            value=child.get(
-                "first_name",
-                "",
-            ),
+        first_name = (
+            st.text_input(
+                "First name",
+                value=child.get(
+                    "first_name",
+                    "",
+                ),
+            )
         )
 
     with col2:
 
-        middle_name = st.text_input(
-            "Middle name",
-            value=child.get(
-                "middle_name",
-                "",
-            ),
+        middle_name = (
+            st.text_input(
+                "Middle name",
+                value=child.get(
+                    "middle_name",
+                    "",
+                ),
+            )
         )
 
-    last_name = st.text_input(
-        "Last name",
-        value=child.get(
-            "last_name",
-            default_last_name,
-        ),
+    last_name = (
+        st.text_input(
+            "Last name",
+            value=child.get(
+                "last_name",
+                default_last_name,
+            ),
+        )
     )
 
-    date_of_birth = st.date_input(
-        "Date of birth",
-        value=child.get(
-            "date_of_birth",
-            None,
-        ),
-        max_value=date.today(),
+    date_of_birth = (
+        st.date_input(
+            "Date of birth",
+            value=child.get(
+                "date_of_birth",
+                None,
+            ),
+            max_value=date.today(),
+        )
     )
 
     grade = st.selectbox(
@@ -2352,14 +3149,16 @@ def child_dialog(
             "has already received."
         )
 
-        baptism_status = st.selectbox(
-            "Has this child been baptized?",
-            sacrament_status_options,
-            index=sacrament_status_index(
-                child.get(
-                    "baptism_status"
-                )
-            ),
+        baptism_status = (
+            st.selectbox(
+                "Has this child been baptized?",
+                sacrament_status_options,
+                index=sacrament_status_index(
+                    child.get(
+                        "baptism_status"
+                    )
+                ),
+            )
         )
 
         if receiving_confirmation:
@@ -2391,7 +3190,6 @@ def child_dialog(
             )
 
         preview_child = {
-
             "receiving_first_communion_reconciliation":
                 receiving_first_communion_reconciliation,
 
@@ -2401,7 +3199,8 @@ def child_dialog(
             "baptism_status":
                 (
                     None
-                    if baptism_status == "Select one"
+                    if baptism_status
+                    == "Select one"
                     else baptism_status
                 ),
 
@@ -2409,7 +3208,10 @@ def child_dialog(
                 (
                     None
                     if first_reconciliation_status
-                    in (None, "Select one")
+                    in (
+                        None,
+                        "Select one",
+                    )
                     else first_reconciliation_status
                 ),
 
@@ -2417,7 +3219,10 @@ def child_dialog(
                 (
                     None
                     if first_communion_status
-                    in (None, "Select one")
+                    in (
+                        None,
+                        "Select one",
+                    )
                     else first_communion_status
                 ),
         }
@@ -2429,7 +3234,8 @@ def child_dialog(
         )
 
         history_questions_complete = (
-            baptism_status != "Select one"
+            baptism_status
+            != "Select one"
         )
 
         if receiving_confirmation:
@@ -2448,10 +3254,9 @@ def child_dialog(
         ):
 
             st.warning(
-                "Sacramental follow-up will be needed. "
-                "Please continue with registration. "
-                "A member of the faith formation team "
-                "will follow up with you."
+                "This registration will need sacramental follow-up. "
+                "You can still continue normally. A member of the "
+                "faith formation team will contact you if needed."
             )
 
     st.divider()
@@ -2473,7 +3278,6 @@ def child_dialog(
             st.error(
                 "Please enter the child's first name."
             )
-
             return
 
         if not last_name.strip():
@@ -2481,7 +3285,6 @@ def child_dialog(
             st.error(
                 "Please enter the child's last name."
             )
-
             return
 
         if not school.strip():
@@ -2489,34 +3292,32 @@ def child_dialog(
             st.error(
                 "Please enter the child's school."
             )
-
             return
 
         if date_of_birth is None:
 
             st.error(
-                "Please enter a date of birth."
+                "Please enter the child's date of birth."
             )
-
             return
 
         if grade == "Select grade":
 
             st.error(
-                "Please select a grade."
+                "Please select the child's grade."
             )
-
             return
 
         if sacramental_history_needed:
 
-            if baptism_status == "Select one":
+            if (
+                baptism_status
+                == "Select one"
+            ):
 
                 st.error(
-                    "Please indicate whether this child "
-                    "has been baptized."
+                    "Please tell us whether this child has been baptized."
                 )
-
                 return
 
         if receiving_confirmation:
@@ -2527,10 +3328,9 @@ def child_dialog(
             ):
 
                 st.error(
-                    "Please indicate whether this child "
-                    "has received First Reconciliation."
+                    "Please tell us whether this child has received "
+                    "First Reconciliation."
                 )
-
                 return
 
             if (
@@ -2539,10 +3339,9 @@ def child_dialog(
             ):
 
                 st.error(
-                    "Please indicate whether this child "
-                    "has received First Communion."
+                    "Please tell us whether this child has received "
+                    "First Communion."
                 )
-
                 return
 
         if sacramental_history_needed:
@@ -2553,8 +3352,10 @@ def child_dialog(
 
         else:
 
-            saved_baptism_status = child.get(
-                "baptism_status"
+            saved_baptism_status = (
+                child.get(
+                    "baptism_status"
+                )
             )
 
         if receiving_confirmation:
@@ -2582,7 +3383,6 @@ def child_dialog(
             )
 
         child_data = {
-
             "first_name":
                 first_name.strip(),
 
@@ -2621,7 +3421,8 @@ def child_dialog(
             editing
             and child.get(
                 "child_id"
-            ) is not None
+            )
+            is not None
         ):
 
             child_data[
@@ -2649,7 +3450,10 @@ def child_dialog(
 # Review dialog
 # ---------------------------------------------------------
 
-@st.dialog("Review Registration")
+@st.dialog(
+    "Review Registration",
+    width="medium",
+)
 def review_dialog():
 
     household = (
@@ -2665,107 +3469,230 @@ def review_dialog():
         == "existing"
     )
 
-    st.subheader(
-        "Household"
+    st.markdown(
+        """
+        <div class="review-section-title">
+            Household
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    parent_a = (
-        f"{household['parent_a_first_name']} "
-        f"{household['parent_a_last_name']}"
+    parent_a = parent_name(
+        household.get(
+            "parent_a_first_name"
+        ),
+        household.get(
+            "parent_a_last_name"
+        ),
     )
 
-    st.write(
-        f"**{parent_a}**"
-    )
-
-    st.write(
-        household[
-            "parent_a_email"
-        ]
-    )
-
-    st.write(
-        household[
-            "parent_a_phone"
-        ]
-    )
-
-    if (
+    parent_b = parent_name(
         household.get(
             "parent_b_first_name"
-        )
-        or household.get(
+        ),
+        household.get(
             "parent_b_last_name"
-        )
+        ),
+    )
+
+    with st.container(
+        border=True,
+        key="review_dialog_household_card",
     ):
 
-        parent_b = (
-            f"{household.get('parent_b_first_name', '')} "
-            f"{household.get('parent_b_last_name', '')}"
-        ).strip()
+        st.markdown(
+            f"""
+            <div class="review-field-label">
+                Parent / Guardian A
+            </div>
 
-        st.write("")
+            <div class="review-person-name">
+                {escape_html(parent_a)}
+            </div>
 
-        st.write(
-            f"**{parent_b}**"
+            <div class="review-field-label">
+                Email
+            </div>
+
+            <div class="review-field-value">
+                {escape_html(household['parent_a_email'])}
+            </div>
+
+            <div class="review-field-label">
+                Phone
+            </div>
+
+            <div class="review-field-value">
+                {escape_html(household['parent_a_phone'])}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if (
+            parent_b
+            or household.get(
+                "parent_b_email"
+            )
+            or household.get(
+                "parent_b_phone"
+            )
+        ):
+
+            st.divider()
+
+            st.markdown(
+                """
+                <div class="review-field-label">
+                    Parent / Guardian B
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            if parent_b:
+
+                st.markdown(
+                    f"""
+                    <div class="review-person-name">
+                        {escape_html(parent_b)}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+            if household.get(
+                "parent_b_email"
+            ):
+
+                st.markdown(
+                    f"""
+                    <div class="review-field-label">
+                        Email
+                    </div>
+
+                    <div class="review-field-value">
+                        {escape_html(household['parent_b_email'])}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+            if household.get(
+                "parent_b_phone"
+            ):
+
+                st.markdown(
+                    f"""
+                    <div class="review-field-label">
+                        Phone
+                    </div>
+
+                    <div class="review-field-value">
+                        {escape_html(household['parent_b_phone'])}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+
+        st.divider()
+
+        address_html = (
+            escape_html(
+                household[
+                    "address_line_1"
+                ]
+            )
         )
 
         if household.get(
-            "parent_b_email"
+            "address_line_2"
         ):
 
-            st.write(
-                household[
-                    "parent_b_email"
-                ]
+            address_html += (
+                "<br>"
+                + escape_html(
+                    household[
+                        "address_line_2"
+                    ]
+                )
             )
 
-        if household.get(
-            "parent_b_phone"
-        ):
+        address_html += (
+            "<br>"
+            f"{escape_html(household['city'])}, "
+            f"{escape_html(household['state'])} "
+            f"{escape_html(household['zip_code'])}"
+        )
 
-            st.write(
-                household[
-                    "parent_b_phone"
-                ]
-            )
+        st.markdown(
+            f"""
+            <div class="review-field-label">
+                Home Address
+            </div>
+
+            <div class="review-field-value">
+                {address_html}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.divider()
+
+        st.markdown(
+            f"""
+            <div class="review-field-label">
+                Emergency Contact
+            </div>
+
+            <div class="review-person-name">
+                {escape_html(household['emergency_contact_name'])}
+            </div>
+
+            <div class="review-field-label">
+                Relationship
+            </div>
+
+            <div class="review-field-value">
+                {escape_html(household['emergency_contact_relationship'])}
+            </div>
+
+            <div class="review-field-label">
+                Phone
+            </div>
+
+            <div class="review-field-value">
+                {escape_html(household['emergency_contact_phone'])}
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     st.write("")
 
-    st.write(
-        household[
-            "address_line_1"
-        ]
-    )
-
-    if household.get(
-        "address_line_2"
-    ):
-
-        st.write(
-            household[
-                "address_line_2"
-            ]
-        )
-
-    st.write(
-        f"{household['city']}, "
-        f"{household['state']} "
-        f"{household['zip_code']}"
-    )
-
-    st.divider()
-
-    st.subheader(
-        "Children"
+    st.markdown(
+        """
+        <div class="review-section-title">
+            Children
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
     for child in children:
 
         child_name = full_name(
-            child.get("first_name"),
-            child.get("middle_name"),
-            child.get("last_name"),
+            child.get(
+                "first_name"
+            ),
+            child.get(
+                "middle_name"
+            ),
+            child.get(
+                "last_name"
+            ),
         )
 
         age = calculate_age(
@@ -2774,93 +3701,177 @@ def review_dialog():
             ]
         )
 
-        st.write(
-            f"**{child_name}**"
-        )
+        with st.container(
+            border=True,
+            key=f"review_dialog_child_card_{child_index}",
+        ):
 
-        st.caption(
-            f"Grade {child['grade']} • "
-            f"{child['school']} • "
-            f"DOB: "
-            f"{child['date_of_birth'].strftime('%m/%d/%Y')} "
-            f"(Age {age})"
-        )
+            st.markdown(
+                f"""
+                <div class="review-child-name">
+                    {escape_html(child_name)}
+                </div>
 
-        preparation = (
-            sacrament_preparation_labels(
-                child
+                <div class="review-field-label">
+                    Grade
+                </div>
+
+                <div class="review-field-value">
+                    {escape_html(child_grade_label(child['grade']))}
+                </div>
+
+                <div class="review-field-label">
+                    School
+                </div>
+
+                <div class="review-field-value">
+                    {escape_html(child['school'])}
+                </div>
+
+                <div class="review-field-label">
+                    Date of Birth
+                </div>
+
+                <div class="review-field-value">
+                    {child['date_of_birth'].strftime('%m/%d/%Y')}
+                </div>
+
+                <div class="review-field-label">
+                    Age
+                </div>
+
+                <div class="review-field-value">
+                    {age}
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-        )
 
-        if preparation:
-
-            st.write(
-                "**Sacrament preparation:** "
-                + ", ".join(
-                    preparation
+            preparation = (
+                sacrament_preparation_labels(
+                    child
                 )
             )
 
-        history_parts = []
+            if preparation:
 
-        if child.get(
-            "baptism_status"
-        ):
+                preparation_text = (
+                    ", ".join(
+                        preparation
+                    )
+                )
 
-            history_parts.append(
-                "Baptized: "
-                f"{child['baptism_status']}"
-            )
+                st.markdown(
+                    f"""
+                    <div class="review-field-label">
+                        Sacrament Preparation
+                    </div>
 
-        if child.get(
-            "first_reconciliation_status"
-        ):
+                    <div class="review-field-value">
+                        {escape_html(preparation_text)}
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
-            history_parts.append(
-                "First Reconciliation: "
-                f"{child['first_reconciliation_status']}"
-            )
+            history_parts = []
 
-        if child.get(
-            "first_communion_status"
-        ):
+            if child.get(
+                "baptism_status"
+            ):
 
-            history_parts.append(
-                "First Communion: "
-                f"{child['first_communion_status']}"
-            )
+                history_parts.append(
+                    (
+                        "Baptism",
+                        child[
+                            "baptism_status"
+                        ],
+                    )
+                )
 
-        if history_parts:
+            if child.get(
+                "first_reconciliation_status"
+            ):
 
-            st.caption(
-                " • ".join(
-                    history_parts
+                history_parts.append(
+                    (
+                        "First Reconciliation",
+                        child[
+                            "first_reconciliation_status"
+                        ],
+                    )
+                )
+
+            if child.get(
+                "first_communion_status"
+            ):
+
+                history_parts.append(
+                    (
+                        "First Communion",
+                        child[
+                            "first_communion_status"
+                        ],
+                    )
+                )
+
+            if history_parts:
+
+                for (
+                    sacrament_name,
+                    sacrament_status,
+                ) in history_parts:
+
+                    st.markdown(
+                        f"""
+                        <div class="review-field-label">
+                            {escape_html(sacrament_name)}
+                        </div>
+
+                        <div class="review-field-value">
+                            {escape_html(sacrament_status)}
+                        </div>
+                        """,
+                        unsafe_allow_html=True,
+                    )
+
+            follow_up_reasons = (
+                sacramental_follow_up_reasons(
+                    child
                 )
             )
 
-        follow_up_reasons = (
-            sacramental_follow_up_reasons(
-                child
-            )
+            if follow_up_reasons:
+
+                st.warning(
+                    "Sacramental follow-up will be needed for this child. "
+                    "You can still submit the registration normally."
+                )
+
+    st.write("")
+
+    with st.container(
+        border=True,
+        key="review_dialog_submit_card",
+    ):
+
+        st.markdown(
+            """
+            <div class="review-submit-title">
+                Take a moment to review your information.
+            </div>
+
+            <div class="review-submit-copy">
+                If everything above looks correct, submit
+                your registration below.
+            </div>
+
+            <div style="height: 0.45rem;"></div>
+            """,
+            unsafe_allow_html=True,
         )
 
-        if follow_up_reasons:
-
-            st.warning(
-                "Sacramental follow-up needed: "
-                + "; ".join(
-                    follow_up_reasons
-                )
-            )
-
-        st.write("")
-
-    st.divider()
-
-    st.warning(
-        "Please review the information above "
-        "before submitting."
-    )
+    st.write("")
 
     submit_label = (
         "Save Changes"
@@ -2925,7 +3936,7 @@ def review_dialog():
                         recipient_email
                     )
 
-                except Exception as email_exc:
+                except Exception:
 
                     st.session_state.confirmation_email_sent = False
 
@@ -2934,7 +3945,7 @@ def review_dialog():
                     )
 
                     st.session_state.confirmation_email_error = (
-                        str(email_exc)
+                        "Confirmation email could not be sent."
                     )
 
             else:
@@ -2971,7 +3982,7 @@ def review_dialog():
                         recipient_email
                     )
 
-                except Exception as email_exc:
+                except Exception:
 
                     st.session_state.confirmation_email_sent = False
 
@@ -2980,7 +3991,7 @@ def review_dialog():
                     )
 
                     st.session_state.confirmation_email_error = (
-                        str(email_exc)
+                        "Confirmation email could not be sent."
                     )
 
             st.session_state.household = None
@@ -2988,11 +3999,12 @@ def review_dialog():
 
             st.rerun()
 
-        except Exception as exc:
+        except Exception:
 
             st.error(
-                "Registration could not be saved: "
-                f"{exc}"
+                "We couldn't save your registration right now. "
+                "Your information is still here, so you won't need "
+                "to enter it again. Please wait a moment and try again."
             )
 
 
@@ -3005,9 +4017,11 @@ def render_roster_card(
     roster: list[dict],
 ) -> None:
 
-    group_key = group[
-        "group_key"
-    ]
+    group_key = (
+        group[
+            "group_key"
+        ]
+    )
 
     title = roster_title(
         group_key,
@@ -3018,21 +4032,34 @@ def render_roster_card(
 
     group_children = [
         child
+
         for child in roster
-        if roster_group_key_for_grade(
-            child[
-                "grade"
-            ]
-        ) == group_key
+
+        if (
+            roster_group_key_for_grade(
+                child[
+                    "grade"
+                ]
+            )
+            == group_key
+        )
     ]
 
     with st.container(
-        border=True
+        border=True,
+        key=f"roster_card_{group_key}",
     ):
+
+        # -------------------------------------------------
+        # Roster title / Catechist edit
+        # -------------------------------------------------
 
         title_col, edit_col = (
             st.columns(
-                [5, 1.2],
+                [
+                    5,
+                    1.2,
+                ],
                 vertical_alignment="center",
             )
         )
@@ -3059,6 +4086,10 @@ def render_roster_card(
                     group
                 )
 
+        # -------------------------------------------------
+        # Catechists
+        # -------------------------------------------------
+
         catechists = (
             group.get(
                 "catechists",
@@ -3070,7 +4101,8 @@ def render_roster_card(
         if catechists:
 
             st.write(
-                f"**Catechists:** {catechists}"
+                f"**Catechists:** "
+                f"{catechists}"
             )
 
         else:
@@ -3079,7 +4111,65 @@ def render_roster_card(
                 "Catechists: Not assigned"
             )
 
+        # -------------------------------------------------
+        # Classroom
+        # -------------------------------------------------
+
+        classroom = (
+            group.get(
+                "classroom",
+                "",
+            )
+            or ""
+        )
+
+        classroom_value = (
+            st.text_input(
+                "Classroom",
+                value=classroom,
+                placeholder="Room 1 - St. Monica",
+                key=(
+                    f"classroom_"
+                    f"{group_key}"
+                ),
+            )
+        )
+
+        if (
+            classroom_value.strip()
+            != classroom.strip()
+        ):
+
+            if st.button(
+                "Save Classroom",
+                key=(
+                    f"save_classroom_"
+                    f"{group_key}"
+                ),
+                use_container_width=True,
+            ):
+
+                try:
+
+                    update_roster_group_classroom(
+                        group_key,
+                        classroom_value,
+                    )
+
+                    st.rerun()
+
+                except Exception:
+
+                    st.error(
+                        "We couldn't save the classroom right now. "
+                        "Please try again."
+                    )
+
         st.write("")
+
+        # -------------------------------------------------
+        # Children
+        # -------------------------------------------------
 
         if not group_children:
 
@@ -3087,7 +4177,6 @@ def render_roster_card(
                 "No children are currently "
                 "registered in this roster."
             )
-
             return
 
         rows = []
@@ -3106,11 +4195,6 @@ def render_roster_card(
                 ),
             )
 
-            # Kindergarten shows grade because the
-            # roster includes both Pre-K and K.
-            #
-            # EDGE and Life Teen also show grade because
-            # each roster contains several grade levels.
             if group_key in (
                 "kindergarten",
                 "edge",
@@ -3148,25 +4232,29 @@ def render_roster_card(
                     }
                 )
 
-        display_df = pd.DataFrame(
-            rows
+        display_df = (
+            pd.DataFrame(
+                rows
+            )
         )
 
         st.caption(
             "Select a child to view details."
         )
 
-        table_event = st.dataframe(
-            display_df,
-            hide_index=True,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="single-row",
-            key=(
-                f"roster_table_"
-                f"{group_key}_"
-                f"{st.session_state.admin_detail_table_nonce}"
-            ),
+        table_event = (
+            st.dataframe(
+                display_df,
+                hide_index=True,
+                use_container_width=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key=(
+                    f"roster_table_"
+                    f"{group_key}_"
+                    f"{st.session_state.admin_detail_table_nonce}"
+                ),
+            )
         )
 
         selected_rows = (
@@ -3184,7 +4272,9 @@ def render_roster_card(
             if (
                 0
                 <= selected_index
-                < len(group_children)
+                < len(
+                    group_children
+                )
             ):
 
                 selected_child = (
@@ -3198,6 +4288,10 @@ def render_roster_card(
                         "child_id"
                     ]
                 )
+
+        # -------------------------------------------------
+        # Export
+        # -------------------------------------------------
 
         export_df = (
             build_export_dataframe(
@@ -3216,8 +4310,7 @@ def render_roster_card(
         )
 
         file_group_name = (
-            group_key
-            .replace(
+            group_key.replace(
                 "_",
                 "-"
             )
@@ -3244,7 +4337,9 @@ def render_roster_card(
 # Admin dashboard
 # ---------------------------------------------------------
 
-if st.session_state.admin_authenticated:
+if (
+    st.session_state.admin_authenticated
+):
 
     if not is_authorized_admin(
         st.session_state.admin_email
@@ -3258,13 +4353,12 @@ if st.session_state.admin_authenticated:
 
         st.rerun()
 
-    # -----------------------------------------------------
-    # Header
-    # -----------------------------------------------------
-
     title_col, logout_col = (
         st.columns(
-            [5, 1.25],
+            [
+                5,
+                1.25,
+            ],
             vertical_alignment="center",
         )
     )
@@ -3295,37 +4389,33 @@ if st.session_state.admin_authenticated:
 
             st.rerun()
 
-    # -----------------------------------------------------
-    # Load admin data
-    # -----------------------------------------------------
-
     try:
 
-        roster = get_admin_roster()
+        roster = (
+            get_admin_roster()
+        )
 
         roster_groups = (
             get_roster_groups()
         )
 
-    except Exception as exc:
+    except Exception:
 
         st.error(
-            "Administrative data could not "
-            f"be loaded: {exc}"
+            "We couldn't load the registration dashboard right now. "
+            "Please refresh the page or try again in a moment."
         )
 
         st.stop()
-
-    # -----------------------------------------------------
-    # Registration overview
-    # -----------------------------------------------------
 
     st.header(
         "Registration Overview"
     )
 
-    total_children = len(
-        roster
+    total_children = (
+        len(
+            roster
+        )
     )
 
     total_households = len(
@@ -3333,13 +4423,18 @@ if st.session_state.admin_authenticated:
             child[
                 "household_reference"
             ]
-            for child in roster
+
+            for child
+            in roster
         }
     )
 
     first_communion_count = sum(
         1
-        for child in roster
+
+        for child
+        in roster
+
         if child.get(
             "receiving_first_communion_reconciliation",
             False,
@@ -3348,7 +4443,10 @@ if st.session_state.admin_authenticated:
 
     confirmation_count = sum(
         1
-        for child in roster
+
+        for child
+        in roster
+
         if child.get(
             "receiving_confirmation",
             False,
@@ -3357,7 +4455,10 @@ if st.session_state.admin_authenticated:
 
     follow_up_count = sum(
         1
-        for child in roster
+
+        for child
+        in roster
+
         if sacramental_follow_up_reasons(
             child
         )
@@ -3408,17 +4509,16 @@ if st.session_state.admin_authenticated:
 
     st.divider()
 
-    # -----------------------------------------------------
-    # PSR rosters
-    # -----------------------------------------------------
-
     st.header(
         "PSR Rosters"
     )
 
     psr_groups = [
         group
-        for group in roster_groups
+
+        for group
+        in roster_groups
+
         if group[
             "category"
         ] == "PSR"
@@ -3433,20 +4533,20 @@ if st.session_state.admin_authenticated:
 
     st.divider()
 
-    # -----------------------------------------------------
-    # Youth Ministry rosters
-    # -----------------------------------------------------
-
     st.header(
         "Youth Ministry Rosters"
     )
 
     youth_groups = [
         group
-        for group in roster_groups
+
+        for group
+        in roster_groups
+
         if group[
             "category"
-        ] == "Youth Ministry"
+        ]
+        == "Youth Ministry"
     ]
 
     for group in youth_groups:
@@ -3458,17 +4558,16 @@ if st.session_state.admin_authenticated:
 
     st.divider()
 
-    # -----------------------------------------------------
-    # Sacramental preparation
-    # -----------------------------------------------------
-
     st.header(
         "Sacramental Preparation"
     )
 
     first_communion_children = [
         child
-        for child in roster
+
+        for child
+        in roster
+
         if child.get(
             "receiving_first_communion_reconciliation",
             False,
@@ -3477,7 +4576,10 @@ if st.session_state.admin_authenticated:
 
     confirmation_children = [
         child
-        for child in roster
+
+        for child
+        in roster
+
         if child.get(
             "receiving_confirmation",
             False,
@@ -3486,15 +4588,14 @@ if st.session_state.admin_authenticated:
 
     follow_up_children = [
         child
-        for child in roster
+
+        for child
+        in roster
+
         if sacramental_follow_up_reasons(
             child
         )
     ]
-
-    # -----------------------------------------------------
-    # First Communion / Reconciliation
-    # -----------------------------------------------------
 
     with st.expander(
         "First Reconciliation / "
@@ -3579,10 +4680,6 @@ if st.session_state.admin_authenticated:
                 mime="text/csv",
                 use_container_width=True,
             )
-
-    # -----------------------------------------------------
-    # Confirmation
-    # -----------------------------------------------------
 
     with st.expander(
         f"Confirmation ({len(confirmation_children)})"
@@ -3678,10 +4775,6 @@ if st.session_state.admin_authenticated:
                 mime="text/csv",
                 use_container_width=True,
             )
-
-    # -----------------------------------------------------
-    # Follow-up
-    # -----------------------------------------------------
 
     with st.expander(
         f"Sacramental Follow-up Needed "
@@ -3796,10 +4889,6 @@ if st.session_state.admin_authenticated:
 
     st.divider()
 
-    # -----------------------------------------------------
-    # Full registration data
-    # -----------------------------------------------------
-
     st.header(
         "All Registrations"
     )
@@ -3808,12 +4897,14 @@ if st.session_state.admin_authenticated:
         "View / Export Full Registration Data"
     ):
 
-        search_text = st.text_input(
-            "Search registrations",
-            placeholder=(
-                "Child, parent, school, email, "
-                "or Household ID"
-            ),
+        search_text = (
+            st.text_input(
+                "Search registrations",
+                placeholder=(
+                    "Child, parent, school, email, "
+                    "or Household ID"
+                ),
+            )
         )
 
         search_value = (
@@ -3863,16 +4954,32 @@ if st.session_state.admin_authenticated:
                     parent_b,
                     child.get(
                         "school"
-                    ) or "",
+                    )
+                    or "",
                     child.get(
                         "parent_a_email"
-                    ) or "",
+                    )
+                    or "",
                     child.get(
                         "parent_b_email"
-                    ) or "",
+                    )
+                    or "",
                     child.get(
                         "household_reference"
-                    ) or "",
+                    )
+                    or "",
+                    child.get(
+                        "emergency_contact_name"
+                    )
+                    or "",
+                    child.get(
+                        "emergency_contact_relationship"
+                    )
+                    or "",
+                    child.get(
+                        "emergency_contact_phone"
+                    )
+                    or "",
                 ]
             ).lower()
 
@@ -3881,6 +4988,7 @@ if st.session_state.admin_authenticated:
                 and search_value
                 not in searchable
             ):
+
                 continue
 
             filtered.append(
@@ -3978,10 +5086,6 @@ if st.session_state.admin_authenticated:
                 "No registrations match your search."
             )
 
-    # -----------------------------------------------------
-    # Open selected child
-    # -----------------------------------------------------
-
     if (
         st.session_state.admin_detail_child_id
         is not None
@@ -3990,7 +5094,10 @@ if st.session_state.admin_authenticated:
         selected_child = next(
             (
                 child
-                for child in roster
+
+                for child
+                in roster
+
                 if child[
                     "child_id"
                 ]
@@ -3999,7 +5106,10 @@ if st.session_state.admin_authenticated:
             None,
         )
 
-        if selected_child is not None:
+        if (
+            selected_child
+            is not None
+        ):
 
             admin_child_detail_dialog(
                 selected_child
@@ -4021,50 +5131,121 @@ if (
     is not None
 ):
 
-    st.title(
-        "Ascension Registration"
-    )
-
-    if (
+    editing_existing = (
         st.session_state.registration_mode
         == "existing"
-    ):
+    )
 
-        st.success(
-            "Household changes saved successfully."
+    household_reference = (
+        st.session_state.submitted_household_reference
+    )
+
+    if LOGO_PATH.exists():
+
+        logo_url = (
+            image_to_data_url(
+                LOGO_PATH
+            )
         )
 
-        st.write(
-            "Your household information "
-            "has been updated."
+        st.markdown(
+            f"""
+            <div class="completion-logo">
+                <img
+                    src="{logo_url}"
+                    alt="Ascension Catholic Church"
+                >
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    if editing_existing:
+
+        st.markdown(
+            """
+            <div class="completion-kicker">
+                Registration Updated
+            </div>
+
+            <div class="completion-title">
+                Your changes have been saved.
+            </div>
+
+            <div class="completion-copy">
+                Thank you! Your household registration has been
+                updated successfully with Ascension Catholic Church.
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
     else:
 
-        st.success(
-            "Registration submitted successfully."
+        st.markdown(
+            """
+            <div class="completion-kicker">
+                Registration Complete
+            </div>
+
+            <div class="completion-title">
+                You're all set!
+            </div>
+
+            <div class="completion-copy">
+                Thank you for registering your family for
+                faith formation at Ascension Catholic Church.
+                Your registration has been received successfully.
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-        st.write(
-            "Thank you! Your family's "
-            "registration has been received."
+    with st.container(
+        border=True,
+        key="completion_household_id_card",
+    ):
+
+        st.markdown(
+            """
+            <div class="household-id-label">
+                Your Household ID
+            </div>
+            """,
+            unsafe_allow_html=True,
         )
 
-    st.subheader(
-        "Your Household ID"
-    )
+        st.code(
+            household_reference,
+            language=None,
+        )
 
-    st.code(
-        st.session_state.submitted_household_reference,
-        language=None,
-    )
+        if editing_existing:
 
-    st.info(
-        "Please keep this Household ID. "
-        "You'll be able to use it later "
-        "to return to your household "
-        "and make changes."
-    )
+            st.markdown(
+                """
+                <div class="household-id-help">
+                    Keep this Household ID for any future changes
+                    to your family's registration.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        else:
+
+            st.markdown(
+                """
+                <div class="household-id-help">
+                    Please keep this ID. You'll use it if you need
+                    to return later to add a child or update your
+                    household registration.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    st.write("")
 
     if (
         st.session_state.confirmation_email_sent
@@ -4072,8 +5253,13 @@ if (
     ):
 
         st.success(
-            "A confirmation email was sent to "
-            f"{st.session_state.confirmation_email_address}."
+            "Confirmation sent to "
+            f"{st.session_state.confirmation_email_address}"
+        )
+
+        st.caption(
+            "Your confirmation email also includes "
+            "your Household ID."
         )
 
     elif (
@@ -4083,34 +5269,77 @@ if (
 
         st.warning(
             "Your registration was saved successfully, "
-            "but we couldn't send the confirmation email. "
-            "Please make a note of your Household ID."
+            "but we couldn't send the confirmation email."
         )
 
-    if st.button(
-        "Return to Start"
+        st.caption(
+            "Your registration is still complete. "
+            "Please make a note of your Household ID "
+            "before leaving this page."
+        )
+
+    with st.container(
+        border=True,
+        key="completion_next_steps_card",
     ):
 
-        st.session_state.household = None
-        st.session_state.children = []
+        if editing_existing:
 
-        st.session_state.submitted_household_id = None
-        st.session_state.submitted_household_reference = None
+            st.markdown(
+                """
+                <div class="next-steps-title">
+                    What happens next?
+                </div>
 
-        st.session_state.existing_household_id = None
-        st.session_state.existing_household_reference = None
+                <div class="next-step">
+                    ✓ Your updated information is now on file.<br>
+                    ✓ Ascension staff can see the changes immediately.<br>
+                    ✓ You can return again later using the same Household ID.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
-        st.session_state.registration_mode = None
+        else:
 
-        st.session_state.confirmation_email_sent = None
-        st.session_state.confirmation_email_address = None
-        st.session_state.confirmation_email_error = None
+            st.markdown(
+                """
+                <div class="next-steps-title">
+                    What happens next?
+                </div>
 
-        clear_verification_state()
-        clear_recovery_state()
-        clear_admin_login_state()
+                <div class="next-step">
+                    ✓ Your household and children are now registered.<br>
+                    ✓ Ascension staff will review the registration.<br>
+                    ✓ If sacramental follow-up is needed,
+                    a member of the faith formation team will contact you.<br>
+                    ✓ You can return later using your Household ID
+                    if anything changes.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
 
+    st.write("")
+
+    if st.button(
+        "Done",
+        type="primary",
+        use_container_width=True,
+    ):
+
+        reset_public_registration_state()
         st.rerun()
+
+    st.markdown(
+        """
+        <div class="completion-footer">
+            Ascension Catholic Church<br>
+            Faith Formation Registration
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
 
     st.stop()
 
@@ -4124,20 +5353,67 @@ if (
     is None
 ):
 
-    st.title(
-        "Ascension Registration"
+    if LOGO_PATH.exists():
+
+        logo_url = (
+            image_to_data_url(
+                LOGO_PATH
+            )
+        )
+
+        st.markdown(
+            f"""
+            <div class="landing-logo">
+                <img
+                    src="{logo_url}"
+                    alt="Ascension Catholic Church"
+                >
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        """
+        <div class="landing-parish">
+            Ascension Catholic Church
+        </div>
+
+        <div class="landing-title">
+            Faith Formation Registration
+        </div>
+
+        <div class="landing-welcome">
+            Welcome! Use this portal to register your children
+            for PSR, EDGE, Life Teen, and sacramental preparation
+            at Ascension Catholic Church.
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    st.write(
-        "Register your household or return "
-        "to an existing registration."
-    )
+    with st.container(
+        border=True,
+        key="landing_new_card",
+    ):
 
-    st.divider()
+        st.markdown(
+            """
+            <div class="landing-section-label">
+                New Registration
+            </div>
 
-    col1, col2 = st.columns(2)
+            <div class="landing-action-title">
+                Register your household
+            </div>
 
-    with col1:
+            <div class="landing-action-description">
+                Register your household and children for the
+                upcoming faith formation year.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         if st.button(
             "Start a New Registration",
@@ -4163,7 +5439,30 @@ if (
 
             st.rerun()
 
-    with col2:
+    st.write("")
+
+    with st.container(
+        border=True,
+        key="landing_returning_card",
+    ):
+
+        st.markdown(
+            """
+            <div class="landing-section-label">
+                Returning Household
+            </div>
+
+            <div class="landing-action-title">
+                Already registered?
+            </div>
+
+            <div class="landing-action-description">
+                Return to your household to review information,
+                add another child, or make changes.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
         if st.button(
             "Return to Existing Household",
@@ -4174,31 +5473,55 @@ if (
             clear_admin_login_state()
 
             st.session_state.show_existing_dialog = True
-
             st.rerun()
 
-    st.write("")
-
-    st.caption(
-        "Don't have your Household ID?"
+    st.markdown(
+        """
+        <div class="landing-recovery">
+            Can't find your Household ID?
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-    if st.button(
-        "Recover Household ID",
-        use_container_width=True,
-    ):
+    recovery_col_1, recovery_col_2, recovery_col_3 = (
+        st.columns(
+            [
+                1.7,
+                1,
+                1.7,
+            ]
+        )
+    )
 
-        clear_verification_state()
-        clear_admin_login_state()
+    with recovery_col_2:
 
-        st.session_state.show_recovery_dialog = True
+        if st.button(
+            "Send My Household ID",
+            type="tertiary",
+            use_container_width=True,
+        ):
 
-        st.rerun()
+            clear_verification_state()
+            clear_admin_login_state()
+
+            st.session_state.show_recovery_dialog = True
+            st.rerun()
 
     st.divider()
 
+    st.markdown(
+        """
+        <div class="landing-admin">
+            Staff Administration
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
     if st.button(
         "Admin Login",
+        type="tertiary",
         use_container_width=True,
     ):
 
@@ -4206,18 +5529,23 @@ if (
         clear_recovery_state()
 
         st.session_state.show_admin_dialog = True
-
         st.rerun()
 
-    if st.session_state.show_existing_dialog:
+    if (
+        st.session_state.show_existing_dialog
+    ):
 
         existing_household_dialog()
 
-    elif st.session_state.show_recovery_dialog:
+    elif (
+        st.session_state.show_recovery_dialog
+    ):
 
         recover_household_id_dialog()
 
-    elif st.session_state.show_admin_dialog:
+    elif (
+        st.session_state.show_admin_dialog
+    ):
 
         admin_login_dialog()
 
@@ -4225,11 +5553,52 @@ if (
 
 
 # ---------------------------------------------------------
-# Main registration page
+# Main registration workspace
+# ---------------------------------------------------------
+
+household = (
+    st.session_state.household
+)
+
+children = (
+    st.session_state.children
+)
+
+child_count = len(
+    children
+)
+
+household_complete = (
+    household_contact_complete(
+        household
+    )
+)
+
+registration_ready = (
+    household_complete
+    and child_count > 0
+)
+
+
+# ---------------------------------------------------------
+# Return to start
+# ---------------------------------------------------------
+
+if st.button(
+    "← Return to Start",
+    type="tertiary",
+):
+
+    reset_public_registration_state()
+    st.rerun()
+
+
+# ---------------------------------------------------------
+# Heading
 # ---------------------------------------------------------
 
 st.title(
-    "Ascension Registration"
+    "Faith Formation Registration"
 )
 
 if (
@@ -4237,74 +5606,317 @@ if (
     == "existing"
 ):
 
-    st.write(
-        f"Updating Household ID: "
-        f"**{st.session_state.existing_household_reference}**"
+    st.caption(
+        f"Household ID: "
+        f"{st.session_state.existing_household_reference}"
+    )
+
+    st.markdown(
+        """
+        <div class="registration-intro">
+            Review your household information, update your
+            children as needed, then review and save your changes.
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
 else:
 
-    st.write(
-        "Complete the information below "
-        "to register your family."
+    st.markdown(
+        """
+        <div class="registration-intro">
+            Complete your household information, add each child,
+            then review everything before submitting.
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
 
-st.divider()
+
+# ---------------------------------------------------------
+# Progress
+# ---------------------------------------------------------
+
+with st.container(
+    border=True,
+    key="progress_card",
+):
+
+    (
+        progress_household,
+        progress_children,
+        progress_review,
+    ) = st.columns(3)
+
+    with progress_household:
+
+        st.markdown(
+            """
+            <div class="progress-label">
+                Step 1
+            </div>
+
+            <div class="progress-title">
+                Household
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if household_complete:
+
+            st.markdown(
+                """
+                <div class="progress-complete">
+                    ✓ Complete
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        elif household is not None:
+
+            st.markdown(
+                """
+                <div class="progress-needed">
+                    Action needed
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        else:
+
+            st.markdown(
+                """
+                <div class="progress-waiting">
+                    Not started
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with progress_children:
+
+        st.markdown(
+            """
+            <div class="progress-label">
+                Step 2
+            </div>
+
+            <div class="progress-title">
+                Children
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if child_count > 0:
+
+            child_word = (
+                "child"
+                if child_count == 1
+                else "children"
+            )
+
+            st.markdown(
+                f"""
+                <div class="progress-complete">
+                    ✓ {child_count} {child_word} added
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        else:
+
+            st.markdown(
+                """
+                <div class="progress-waiting">
+                    None added
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+    with progress_review:
+
+        st.markdown(
+            """
+            <div class="progress-label">
+                Step 3
+            </div>
+
+            <div class="progress-title">
+                Review
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if registration_ready:
+
+            st.markdown(
+                """
+                <div class="progress-complete">
+                    ✓ Ready
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        else:
+
+            st.markdown(
+                """
+                <div class="progress-waiting">
+                    Waiting
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+
+st.write("")
 
 
 # ---------------------------------------------------------
 # Household section
 # ---------------------------------------------------------
 
+st.markdown(
+    """
+    <div class="section-eyebrow">
+        Step 1
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 st.header(
     "Household"
 )
 
-household = (
-    st.session_state.household
-)
-
 if household is None:
 
-    st.info(
-        "Household information must be "
-        "completed before adding children."
-    )
-
-    if st.button(
-        "Add Household Information",
-        type="primary",
+    with st.container(
+        border=True,
+        key="household_empty_card",
     ):
 
-        household_dialog()
+        st.markdown(
+            """
+            <div class="empty-state-title">
+                First, tell us about your household.
+            </div>
+
+            <div class="empty-state-copy">
+                We'll use this information for registration
+                communications and to identify your family.
+                Household information must be completed before
+                children can be added.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if st.button(
+            "Add Household Information",
+            type="primary",
+            use_container_width=True,
+        ):
+
+            household_dialog()
 
 else:
 
     with st.container(
-        border=True
+        border=True,
+        key="household_card",
     ):
 
-        parent_a = (
-            f"{household['parent_a_first_name']} "
-            f"{household['parent_a_last_name']}"
-        )
+        if household_complete:
 
-        parent_b = (
-            f"{household.get('parent_b_first_name', '')} "
-            f"{household.get('parent_b_last_name', '')}"
-        ).strip()
-
-        if parent_b:
-
-            st.subheader(
-                f"{parent_a} & {parent_b}"
+            st.caption(
+                "✓ Household information complete"
             )
 
         else:
 
-            st.subheader(
+            st.warning(
+                "Please add an emergency contact before "
+                "reviewing or saving this registration."
+            )
+
+        parent_a_first = (
+            household.get(
+                "parent_a_first_name",
+                "",
+            ).strip()
+        )
+
+        parent_a_last = (
+            household.get(
+                "parent_a_last_name",
+                "",
+            ).strip()
+        )
+
+        parent_b_first = (
+            household.get(
+                "parent_b_first_name",
+                "",
+            ).strip()
+        )
+
+        parent_b_last = (
+            household.get(
+                "parent_b_last_name",
+                "",
+            ).strip()
+        )
+
+        parent_a = (
+            f"{parent_a_first} "
+            f"{parent_a_last}"
+        ).strip()
+
+        parent_b = (
+            f"{parent_b_first} "
+            f"{parent_b_last}"
+        ).strip()
+
+        if parent_b:
+
+            if (
+                parent_a_last
+                and parent_b_last
+                and parent_a_last.casefold()
+                == parent_b_last.casefold()
+            ):
+
+                household_name = (
+                    f"{parent_a_first} & "
+                    f"{parent_b_first} "
+                    f"{parent_a_last}"
+                )
+
+            else:
+
+                household_name = (
+                    f"{parent_a} & {parent_b}"
+                )
+
+        else:
+
+            household_name = (
                 parent_a
             )
+
+        st.subheader(
+            household_name
+        )
 
         st.write(
             household[
@@ -4336,8 +5948,30 @@ else:
             f"{household['parent_a_phone']}"
         )
 
+        if household.get(
+            "emergency_contact_name"
+        ):
+
+            st.write("")
+
+            st.caption(
+                "Emergency contact"
+            )
+
+            st.write(
+                f"{household['emergency_contact_name']} "
+                f"• "
+                f"{household['emergency_contact_relationship']} "
+                f"• "
+                f"{household['emergency_contact_phone']}"
+            )
+
         if st.button(
-            "Edit Household",
+            (
+                "Edit Household"
+                if household_complete
+                else "Add Emergency Contact"
+            ),
             key="edit_household",
         ):
 
@@ -4351,46 +5985,79 @@ st.divider()
 # Children section
 # ---------------------------------------------------------
 
-st.header(
-    "Children"
+st.markdown(
+    """
+    <div class="section-eyebrow">
+        Step 2
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-if household is None:
+if child_count == 0:
 
-    st.caption(
-        "Complete household information "
-        "before adding children."
+    st.header(
+        "Children"
     )
 
 else:
 
-    children = (
-        st.session_state.children
+    st.header(
+        f"Children · {child_count} added"
     )
+
+
+if household is None:
+
+    st.caption(
+        "Complete your household information first. "
+        "You'll then be able to add children."
+    )
+
+else:
 
     if not children:
 
-        st.info(
-            "No children have been added yet."
-        )
-
-    for index, child in enumerate(
-        children
-    ):
-
         with st.container(
-            border=True
+            border=True,
+            key="children_empty_card",
         ):
 
-            (
-                name_col,
-                edit_col,
-                remove_col,
-            ) = st.columns(
-                [5, 1.25, 1.75]
+            st.markdown(
+                """
+                <div class="empty-state-title">
+                    Next, add each child you're registering.
+                </div>
+
+                <div class="empty-state-copy">
+                    You'll enter basic school information and
+                    indicate whether the child is preparing for
+                    First Reconciliation / First Communion or
+                    Confirmation this year.
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
 
-            with name_col:
+            if st.button(
+                "＋ Add a Child",
+                type="primary",
+                use_container_width=True,
+                key="first_add_child",
+            ):
+
+                child_dialog()
+
+    else:
+
+        for index, child in enumerate(
+            children
+        ):
+
+            with st.container(
+                border=True,
+                key=f"child_card_{index}",
+            ):
 
                 child_name = full_name(
                     child.get(
@@ -4404,22 +6071,20 @@ else:
                     ),
                 )
 
-                st.subheader(
-                    child_name
-                )
-
                 age = calculate_age(
                     child[
                         "date_of_birth"
                     ]
                 )
 
+                st.subheader(
+                    child_name
+                )
+
                 st.caption(
-                    f"Grade {child['grade']} • "
-                    f"{child['school']} • "
-                    f"DOB: "
-                    f"{child['date_of_birth'].strftime('%m/%d/%Y')} "
-                    f"(Age {age})"
+                    f"{child_grade_label(child['grade'])} "
+                    f"• {child['school']} "
+                    f"• Age {age}"
                 )
 
                 preparation = (
@@ -4449,105 +6114,196 @@ else:
                         "Sacramental follow-up needed"
                     )
 
-            with edit_col:
+                edit_col, remove_col = (
+                    st.columns(2)
+                )
 
-                if st.button(
-                    "Edit",
-                    key=(
-                        f"edit_child_"
-                        f"{index}"
-                    ),
-                    use_container_width=True,
-                ):
+                with edit_col:
 
-                    child_dialog(
-                        index
-                    )
+                    if st.button(
+                        "Edit",
+                        key=(
+                            f"edit_child_"
+                            f"{index}"
+                        ),
+                        use_container_width=True,
+                    ):
 
-            with remove_col:
+                        child_dialog(
+                            index
+                        )
 
-                if st.button(
-                    "Remove",
-                    key=(
-                        f"remove_child_"
-                        f"{index}"
-                    ),
-                    use_container_width=True,
-                ):
+                with remove_col:
 
-                    st.session_state.children.pop(
-                        index
-                    )
+                    if st.button(
+                        "Remove",
+                        key=(
+                            f"remove_child_"
+                            f"{index}"
+                        ),
+                        use_container_width=True,
+                    ):
 
-                    st.rerun()
+                        st.session_state.children.pop(
+                            index
+                        )
 
-    if st.button(
-        "＋ Add a Child",
-        type="primary",
-    ):
+                        st.rerun()
 
-        child_dialog()
+        if st.button(
+            "＋ Add Another Child",
+            type="primary",
+            use_container_width=True,
+        ):
+
+            child_dialog()
 
 
 st.divider()
 
 
 # ---------------------------------------------------------
-# Review / submit
+# Review section
 # ---------------------------------------------------------
 
-st.header(
-    "Review"
+st.markdown(
+    """
+    <div class="section-eyebrow">
+        Step 3
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
-registration_ready = (
-    st.session_state.household
-    is not None
-    and len(
-        st.session_state.children
-    ) > 0
+st.header(
+    "Review & Submit"
 )
 
 if registration_ready:
 
-    child_count = len(
-        st.session_state.children
-    )
+    with st.container(
+        border=True,
+        key="review_ready_card",
+    ):
 
-    st.success(
-        f"Household information complete • "
-        f"{child_count} "
-        f"{'child' if child_count == 1 else 'children'} "
-        f"added"
-    )
+        st.markdown(
+            """
+            <div class="review-ready-title">
+                Everything looks ready.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
-    review_button_text = (
-        "Review & Save Changes"
+        child_word = (
+            "child"
+            if child_count == 1
+            else "children"
+        )
+
+        st.markdown(
+            f"""
+            <div class="review-check">
+                ✓ Household information complete<br>
+                ✓ Emergency contact provided<br>
+                ✓ {child_count} {child_word} added
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.write("")
+
         if (
             st.session_state.registration_mode
             == "existing"
-        )
-        else "Review & Submit"
-    )
+        ):
 
-    if st.button(
-        review_button_text,
-        type="primary",
-        use_container_width=True,
-    ):
+            review_button_text = (
+                "Review Changes"
+            )
 
-        review_dialog()
+        else:
+
+            review_button_text = (
+                "Review Registration"
+            )
+
+        if st.button(
+            review_button_text,
+            type="primary",
+            use_container_width=True,
+        ):
+
+            review_dialog()
 
 else:
 
-    st.caption(
-        "Complete household information "
-        "and add at least one child "
-        "before submitting."
-    )
+    with st.container(
+        border=True,
+        key="review_pending_card",
+    ):
 
-    st.button(
-        "Review & Submit",
-        disabled=True,
-        use_container_width=True,
-    )
+        st.markdown(
+            """
+            <div class="review-ready-title">
+                A little more to go.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        if household is None:
+
+            st.write(
+                "○ Complete household information"
+            )
+
+        elif not household_complete:
+
+            st.write(
+                "○ Add an emergency contact"
+            )
+
+        else:
+
+            st.write(
+                "✓ Household information complete"
+            )
+
+        if child_count == 0:
+
+            st.write(
+                "○ Add at least one child"
+            )
+
+        else:
+
+            st.write(
+                f"✓ {child_count} "
+                f"{'child' if child_count == 1 else 'children'} added"
+            )
+
+        st.write("")
+
+        st.button(
+            "Review Registration",
+            disabled=True,
+            use_container_width=True,
+        )
+
+
+# ---------------------------------------------------------
+# Privacy note
+# ---------------------------------------------------------
+
+st.markdown(
+    """
+    <div class="privacy-note">
+        Registration information is collected by
+        Ascension Catholic Church for faith formation,
+        sacramental preparation, and ministry administration.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)

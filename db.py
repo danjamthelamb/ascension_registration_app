@@ -282,6 +282,86 @@ def init_db() -> None:
             """
         )
 
+        # -------------------------------------------------
+        # Roster groups
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS roster_groups (
+                group_key TEXT PRIMARY KEY,
+                display_name TEXT NOT NULL,
+                category TEXT NOT NULL,
+                catechists TEXT NOT NULL DEFAULT ''
+            );
+            """
+        )
+
+        # -------------------------------------------------
+        # Seed standard roster groups
+        # -------------------------------------------------
+        #
+        # INSERT OR IGNORE means this runs safely every time
+        # the app starts without overwriting catechist names
+        # that an administrator has already entered.
+        # -------------------------------------------------
+
+        roster_groups = [
+            (
+                "kindergarten",
+                "Kindergarten",
+                "PSR",
+            ),
+            (
+                "grade_1",
+                "Grade 1",
+                "PSR",
+            ),
+            (
+                "grade_2",
+                "Grade 2",
+                "PSR",
+            ),
+            (
+                "grade_3",
+                "Grade 3",
+                "PSR",
+            ),
+            (
+                "grade_4",
+                "Grade 4",
+                "PSR",
+            ),
+            (
+                "grade_5",
+                "Grade 5",
+                "PSR",
+            ),
+            (
+                "edge",
+                "EDGE",
+                "Youth Ministry",
+            ),
+            (
+                "life_teen",
+                "Life Teen",
+                "Youth Ministry",
+            ),
+        ]
+
+        conn.executemany(
+            """
+            INSERT OR IGNORE INTO roster_groups (
+                group_key,
+                display_name,
+                category,
+                catechists
+            )
+            VALUES (?, ?, ?, '');
+            """,
+            roster_groups,
+        )
+
 
 # ---------------------------------------------------------
 # Household reference generator
@@ -406,7 +486,7 @@ def get_household_references_by_email(
 
 
 # ---------------------------------------------------------
-# Create household email verification code
+# Create household verification code
 # ---------------------------------------------------------
 
 def create_household_verification(
@@ -414,8 +494,6 @@ def create_household_verification(
 ) -> dict | None:
     """
     Create a new verification code for an existing household.
-
-    Returns information needed by the email layer.
 
     The plaintext code is returned so the application
     can email it, but it is NOT stored in SQLite.
@@ -469,7 +547,7 @@ def create_household_verification(
         now_text = now.isoformat()
         expires_text = expires_at.isoformat()
 
-        # Invalidate any previous unused codes.
+        # Invalidate previous unused codes.
         conn.execute(
             """
             UPDATE verification_codes
@@ -523,7 +601,7 @@ def create_household_verification(
 
 
 # ---------------------------------------------------------
-# Verify household email code
+# Verify household code
 # ---------------------------------------------------------
 
 def verify_household_code(
@@ -532,16 +610,6 @@ def verify_household_code(
 ) -> tuple[bool, str]:
     """
     Verify a one-time household email code.
-
-    Possible responses:
-
-        (True, "verified")
-
-        (False, "invalid")
-        (False, "expired")
-        (False, "locked")
-        (False, "no_active_code")
-        (False, "household_not_found")
     """
 
     household_reference = (
@@ -599,10 +667,6 @@ def verify_household_code(
         max_attempts = verification[4]
         expires_at_text = verification[5]
 
-        # ---------------------------------------------
-        # Check expiration
-        # ---------------------------------------------
-
         expires_at = datetime.fromisoformat(
             expires_at_text
         )
@@ -623,16 +687,8 @@ def verify_household_code(
 
             return False, "expired"
 
-        # ---------------------------------------------
-        # Check attempt limit
-        # ---------------------------------------------
-
         if attempt_count >= max_attempts:
             return False, "locked"
-
-        # ---------------------------------------------
-        # Compare submitted code
-        # ---------------------------------------------
 
         submitted_hash = _hash_verification_code(
             code,
@@ -659,10 +715,6 @@ def verify_household_code(
             )
 
             return True, "verified"
-
-        # ---------------------------------------------
-        # Incorrect code
-        # ---------------------------------------------
 
         new_attempt_count = (
             attempt_count + 1
@@ -710,26 +762,10 @@ def create_admin_verification(
     email: str,
 ) -> dict:
     """
-    Create a new one-time verification code for
-    an authorized admin email address.
+    Create a one-time verification code for an
+    authorized administrator.
 
-    IMPORTANT:
-    Authorization is handled by the application.
-
-    The app should check the email against the approved
-    admin allowlist in Streamlit secrets BEFORE calling
-    this function.
-
-    Returns:
-
-        {
-            "email": "admin@example.com",
-            "code": "482913",
-            "expires_minutes": 10
-        }
-
-    The plaintext code is returned so the application
-    can email it, but it is NOT stored in SQLite.
+    Authorization itself is handled by app.py.
     """
 
     email = email.strip().lower()
@@ -762,8 +798,7 @@ def create_admin_verification(
 
     with _connect() as conn:
 
-        # Invalidate any previous unused admin codes
-        # for this email address.
+        # Invalidate previous unused codes.
         conn.execute(
             """
             UPDATE admin_verification_codes
@@ -822,16 +857,7 @@ def verify_admin_code(
     code: str,
 ) -> tuple[bool, str]:
     """
-    Verify a one-time admin login code.
-
-    Possible responses:
-
-        (True, "verified")
-
-        (False, "invalid")
-        (False, "expired")
-        (False, "locked")
-        (False, "no_active_code")
+    Verify a one-time administrator login code.
     """
 
     email = email.strip().lower()
@@ -873,10 +899,6 @@ def verify_admin_code(
         max_attempts = verification[4]
         expires_at_text = verification[5]
 
-        # ---------------------------------------------
-        # Check expiration
-        # ---------------------------------------------
-
         expires_at = datetime.fromisoformat(
             expires_at_text
         )
@@ -897,16 +919,8 @@ def verify_admin_code(
 
             return False, "expired"
 
-        # ---------------------------------------------
-        # Check attempt limit
-        # ---------------------------------------------
-
         if attempt_count >= max_attempts:
             return False, "locked"
-
-        # ---------------------------------------------
-        # Compare submitted code
-        # ---------------------------------------------
 
         submitted_hash = _hash_verification_code(
             code,
@@ -920,8 +934,6 @@ def verify_admin_code(
 
         if code_matches:
 
-            # Successful login codes become unusable
-            # immediately.
             conn.execute(
                 """
                 UPDATE admin_verification_codes
@@ -935,10 +947,6 @@ def verify_admin_code(
             )
 
             return True, "verified"
-
-        # ---------------------------------------------
-        # Incorrect code
-        # ---------------------------------------------
 
         new_attempt_count = (
             attempt_count + 1
@@ -989,10 +997,6 @@ def save_registration(
     """
     Save one complete new household registration
     and all of its children.
-
-    Returns:
-        household_id
-        household_reference
     """
 
     if not children:
@@ -1204,8 +1208,8 @@ def get_registration_by_reference(
     Load a household and all of its children using
     the public Household ID.
 
-    This should only be called by the public
-    application AFTER email verification.
+    This should only be called by the public application
+    AFTER email verification.
     """
 
     household_reference = (
@@ -1425,7 +1429,7 @@ def update_registration(
         }
 
         # ---------------------------------------------
-        # Children still present
+        # Child IDs still present in submitted data
         # ---------------------------------------------
 
         submitted_child_ids = {
@@ -1445,9 +1449,7 @@ def update_registration(
             - submitted_child_ids
         )
 
-        for child_id in (
-            children_to_delete
-        ):
+        for child_id in children_to_delete:
 
             conn.execute(
                 """
@@ -1462,7 +1464,7 @@ def update_registration(
             )
 
         # ---------------------------------------------
-        # Update existing / insert new
+        # Update existing / insert new children
         # ---------------------------------------------
 
         for child in children:
@@ -1650,3 +1652,226 @@ def update_registration(
                         ),
                     ),
                 )
+
+
+# ---------------------------------------------------------
+# Admin roster
+# ---------------------------------------------------------
+
+def get_admin_roster() -> list[dict]:
+    """
+    Return all registered children with their associated
+    household information for the administrative dashboard.
+
+    The application is responsible for ensuring this is
+    only called after an administrator is authenticated.
+    """
+
+    with _connect() as conn:
+
+        conn.row_factory = sqlite3.Row
+
+        rows = conn.execute(
+            """
+            SELECT
+                c.child_id,
+                c.household_id,
+
+                c.first_name,
+                c.middle_name,
+                c.last_name,
+                c.date_of_birth,
+                c.grade,
+                c.school,
+
+                c.receiving_first_communion_reconciliation,
+                c.receiving_confirmation,
+
+                c.baptism_status,
+                c.first_reconciliation_status,
+                c.first_communion_status,
+
+                h.household_reference,
+
+                h.parent_a_first_name,
+                h.parent_a_last_name,
+                h.parent_a_email,
+                h.parent_a_phone,
+
+                h.parent_b_first_name,
+                h.parent_b_last_name,
+                h.parent_b_email,
+                h.parent_b_phone,
+
+                h.address_line_1,
+                h.address_line_2,
+                h.city,
+                h.state,
+                h.zip_code
+
+            FROM children AS c
+
+            INNER JOIN households AS h
+                ON c.household_id = h.household_id
+
+            ORDER BY
+                CASE c.grade
+                    WHEN 'Pre-K' THEN 0
+                    WHEN 'K' THEN 1
+                    WHEN '1' THEN 2
+                    WHEN '2' THEN 3
+                    WHEN '3' THEN 4
+                    WHEN '4' THEN 5
+                    WHEN '5' THEN 6
+                    WHEN '6' THEN 7
+                    WHEN '7' THEN 8
+                    WHEN '8' THEN 9
+                    WHEN '9' THEN 10
+                    WHEN '10' THEN 11
+                    WHEN '11' THEN 12
+                    WHEN '12' THEN 13
+                    ELSE 99
+                END,
+
+                c.last_name,
+                c.first_name;
+            """
+        ).fetchall()
+
+    roster = []
+
+    for row in rows:
+
+        child = dict(row)
+
+        child["date_of_birth"] = (
+            date.fromisoformat(
+                child[
+                    "date_of_birth"
+                ]
+            )
+        )
+
+        child[
+            "receiving_first_communion_reconciliation"
+        ] = bool(
+            child[
+                "receiving_first_communion_reconciliation"
+            ]
+        )
+
+        child[
+            "receiving_confirmation"
+        ] = bool(
+            child[
+                "receiving_confirmation"
+            ]
+        )
+
+        roster.append(
+            child
+        )
+
+    return roster
+
+
+# ---------------------------------------------------------
+# Roster groups / catechists
+# ---------------------------------------------------------
+
+def get_roster_groups() -> list[dict]:
+    """
+    Return all configured PSR and Youth Ministry
+    roster groups, including their catechist names.
+
+    Results are returned in ministry/grade order.
+    """
+
+    group_order = [
+        "kindergarten",
+        "grade_1",
+        "grade_2",
+        "grade_3",
+        "grade_4",
+        "grade_5",
+        "edge",
+        "life_teen",
+    ]
+
+    with _connect() as conn:
+
+        conn.row_factory = sqlite3.Row
+
+        rows = conn.execute(
+            """
+            SELECT
+                group_key,
+                display_name,
+                category,
+                catechists
+
+            FROM roster_groups;
+            """
+        ).fetchall()
+
+    groups_by_key = {
+        row["group_key"]: dict(row)
+        for row in rows
+    }
+
+    return [
+        groups_by_key[group_key]
+        for group_key in group_order
+        if group_key in groups_by_key
+    ]
+
+
+def update_roster_group_catechists(
+    group_key: str,
+    catechists: str,
+) -> None:
+    """
+    Update the editable catechist field for a roster group.
+
+    Example:
+
+        update_roster_group_catechists(
+            "grade_2",
+            "Jane Smith, John Doe",
+        )
+    """
+
+    group_key = (
+        group_key
+        .strip()
+        .lower()
+    )
+
+    catechists = (
+        catechists
+        .strip()
+    )
+
+    if not group_key:
+        raise ValueError(
+            "Roster group cannot be empty."
+        )
+
+    with _connect() as conn:
+
+        cursor = conn.execute(
+            """
+            UPDATE roster_groups
+            SET catechists = ?
+            WHERE group_key = ?;
+            """,
+            (
+                catechists,
+                group_key,
+            ),
+        )
+
+        if cursor.rowcount == 0:
+            raise ValueError(
+                f"Unknown roster group: {group_key}"
+            )

@@ -1,16 +1,20 @@
 from datetime import date
 import re
 
+import pandas as pd
 import streamlit as st
 
 from db import (
     create_admin_verification,
     create_household_verification,
+    get_admin_roster,
     get_household_references_by_email,
     get_registration_by_reference,
+    get_roster_groups,
     init_db,
     save_registration,
     update_registration,
+    update_roster_group_catechists,
     verify_admin_code,
     verify_household_code,
 )
@@ -43,10 +47,6 @@ def calculate_age(date_of_birth: date) -> int:
 
 
 def is_valid_email(email: str) -> bool:
-    """
-    Practical email validation.
-    """
-
     email = email.strip()
 
     pattern = (
@@ -59,13 +59,6 @@ def is_valid_email(email: str) -> bool:
 
 
 def normalize_phone(phone: str) -> str | None:
-    """
-    Validate and normalize a US phone number.
-
-    Returns:
-        (304) 555-1234
-    """
-
     digits = re.sub(r"\D", "", phone)
 
     if len(digits) == 11 and digits.startswith("1"):
@@ -74,7 +67,6 @@ def normalize_phone(phone: str) -> str | None:
     if len(digits) != 10:
         return None
 
-    # US area codes and exchanges cannot begin with 0 or 1.
     if digits[0] in "01":
         return None
 
@@ -89,15 +81,6 @@ def normalize_phone(phone: str) -> str | None:
 
 
 def normalize_zip(zip_code: str) -> str | None:
-    """
-    Validate and normalize a US ZIP code.
-
-    Accepts:
-        25033
-        250331234
-        25033-1234
-    """
-
     zip_code = zip_code.strip()
 
     if re.fullmatch(r"\d{5}", zip_code):
@@ -119,10 +102,6 @@ def normalize_zip(zip_code: str) -> str | None:
 
 
 def mask_email(email: str) -> str:
-    """
-    Mask an email address for display.
-    """
-
     if "@" not in email:
         return email
 
@@ -130,6 +109,7 @@ def mask_email(email: str) -> str:
 
     if len(username) <= 1:
         masked_username = "•"
+
     else:
         masked_username = (
             username[0]
@@ -140,18 +120,12 @@ def mask_email(email: str) -> str:
 
 
 def get_admin_emails() -> set[str]:
-    """
-    Read the approved admin email addresses
-    from Streamlit secrets.
-    """
-
     try:
         emails = st.secrets["admins"]["emails"]
 
     except (KeyError, FileNotFoundError):
         return set()
 
-    # Allow either a list or a single string.
     if isinstance(emails, str):
         emails = [emails]
 
@@ -163,14 +137,10 @@ def get_admin_emails() -> set[str]:
 
 
 def is_authorized_admin(email: str) -> bool:
-    """
-    Return True if the supplied email address is
-    present in the private admin allowlist.
-    """
-
-    normalized_email = email.strip().lower()
-
-    return normalized_email in get_admin_emails()
+    return (
+        email.strip().lower()
+        in get_admin_emails()
+    )
 
 
 def clear_verification_state() -> None:
@@ -185,21 +155,24 @@ def clear_recovery_state() -> None:
 
 
 def clear_admin_login_state() -> None:
-    """
-    Clear temporary admin-login information.
-
-    This does not log out an already authenticated admin.
-    """
-
     st.session_state.admin_verification_email = None
     st.session_state.show_admin_dialog = False
 
 
-def sacrament_status_index(status: str | None) -> int:
+def clear_admin_child_detail() -> None:
     """
-    Convert a stored sacramental status into
-    its selectbox index.
+    Close the current child detail and reset
+    roster-table selection state.
     """
+
+    st.session_state.admin_detail_child_id = None
+
+    st.session_state.admin_detail_table_nonce += 1
+
+
+def sacrament_status_index(
+    status: str | None,
+) -> int:
 
     options = [
         "Select one",
@@ -217,10 +190,6 @@ def sacrament_status_index(status: str | None) -> int:
 def sacrament_preparation_labels(
     child: dict,
 ) -> list[str]:
-    """
-    Return the sacramental preparation programs
-    selected for a child.
-    """
 
     labels = []
 
@@ -246,12 +215,6 @@ def sacrament_preparation_labels(
 def sacramental_follow_up_reasons(
     child: dict,
 ) -> list[str]:
-    """
-    Identify sacramental-history answers that
-    require staff follow-up.
-
-    Registration is NOT blocked.
-    """
 
     reasons = []
 
@@ -277,22 +240,19 @@ def sacramental_follow_up_reasons(
         "first_communion_status"
     )
 
-    # First Communion / Reconciliation preparation
-    # requires previous Baptism.
     if receiving_first_communion:
 
         if baptism_status != "Yes":
+
             reasons.append(
-                f"Baptism: "
+                "Baptism: "
                 f"{baptism_status or 'Not provided'}"
             )
 
-    # Confirmation preparation requires Baptism,
-    # First Reconciliation, and First Communion.
     if receiving_confirmation:
 
         baptism_reason = (
-            f"Baptism: "
+            "Baptism: "
             f"{baptism_status or 'Not provided'}"
         )
 
@@ -305,18 +265,342 @@ def sacramental_follow_up_reasons(
             )
 
         if first_reconciliation_status != "Yes":
+
             reasons.append(
                 "First Reconciliation: "
                 f"{first_reconciliation_status or 'Not provided'}"
             )
 
         if first_communion_status != "Yes":
+
             reasons.append(
                 "First Communion: "
                 f"{first_communion_status or 'Not provided'}"
             )
 
     return reasons
+
+
+def full_name(
+    first_name: str | None,
+    middle_name: str | None,
+    last_name: str | None,
+) -> str:
+
+    return " ".join(
+        part.strip()
+        for part in [
+            first_name or "",
+            middle_name or "",
+            last_name or "",
+        ]
+        if part and part.strip()
+    )
+
+
+def parent_name(
+    first_name: str | None,
+    last_name: str | None,
+) -> str:
+
+    return " ".join(
+        part.strip()
+        for part in [
+            first_name or "",
+            last_name or "",
+        ]
+        if part and part.strip()
+    )
+
+
+def roster_group_key_for_grade(
+    grade: str,
+) -> str | None:
+    """
+    Determine which displayed ministry roster
+    a child belongs to.
+
+    Pre-K and Kindergarten share the
+    Kindergarten roster.
+    """
+
+    if grade in (
+        "Pre-K",
+        "K",
+    ):
+        return "kindergarten"
+
+    if grade in (
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+    ):
+        return f"grade_{grade}"
+
+    if grade in (
+        "6",
+        "7",
+        "8",
+    ):
+        return "edge"
+
+    if grade in (
+        "9",
+        "10",
+        "11",
+        "12",
+    ):
+        return "life_teen"
+
+    return None
+
+
+def roster_title(
+    group_key: str,
+    default_name: str,
+) -> str:
+
+    titles = {
+        "kindergarten": "Kindergarten",
+        "grade_1": "1st Grade",
+        "grade_2": "2nd Grade",
+        "grade_3": "3rd Grade",
+        "grade_4": "4th Grade",
+        "grade_5": "5th Grade",
+        "edge": "EDGE",
+        "life_teen": "Life Teen",
+    }
+
+    return titles.get(
+        group_key,
+        default_name,
+    )
+
+
+def program_name_for_child(
+    child: dict,
+) -> str:
+
+    group_key = roster_group_key_for_grade(
+        child.get(
+            "grade",
+            "",
+        )
+    )
+
+    if group_key is None:
+        return "Unassigned"
+
+    return roster_title(
+        group_key,
+        group_key,
+    )
+
+
+def build_export_dataframe(
+    children: list[dict],
+) -> pd.DataFrame:
+
+    rows = []
+
+    for child in children:
+
+        child_name = full_name(
+            child.get("first_name"),
+            child.get("middle_name"),
+            child.get("last_name"),
+        )
+
+        parent_a = parent_name(
+            child.get(
+                "parent_a_first_name"
+            ),
+            child.get(
+                "parent_a_last_name"
+            ),
+        )
+
+        parent_b = parent_name(
+            child.get(
+                "parent_b_first_name"
+            ),
+            child.get(
+                "parent_b_last_name"
+            ),
+        )
+
+        follow_up = (
+            sacramental_follow_up_reasons(
+                child
+            )
+        )
+
+        rows.append(
+            {
+                "Household ID":
+                    child.get(
+                        "household_reference",
+                        "",
+                    ),
+
+                "Child":
+                    child_name,
+
+                "First Name":
+                    child.get(
+                        "first_name",
+                        "",
+                    ),
+
+                "Middle Name":
+                    child.get(
+                        "middle_name"
+                    ) or "",
+
+                "Last Name":
+                    child.get(
+                        "last_name",
+                        "",
+                    ),
+
+                "Date of Birth":
+                    child[
+                        "date_of_birth"
+                    ].strftime(
+                        "%m/%d/%Y"
+                    ),
+
+                "Age":
+                    calculate_age(
+                        child[
+                            "date_of_birth"
+                        ]
+                    ),
+
+                "Grade":
+                    child.get(
+                        "grade",
+                        "",
+                    ),
+
+                "School":
+                    child.get(
+                        "school",
+                        "",
+                    ),
+
+                "Parent A":
+                    parent_a,
+
+                "Parent A Email":
+                    child.get(
+                        "parent_a_email",
+                        "",
+                    ),
+
+                "Parent A Phone":
+                    child.get(
+                        "parent_a_phone",
+                        "",
+                    ),
+
+                "Parent B":
+                    parent_b,
+
+                "Parent B Email":
+                    child.get(
+                        "parent_b_email"
+                    ) or "",
+
+                "Parent B Phone":
+                    child.get(
+                        "parent_b_phone"
+                    ) or "",
+
+                "Address Line 1":
+                    child.get(
+                        "address_line_1",
+                        "",
+                    ),
+
+                "Address Line 2":
+                    child.get(
+                        "address_line_2"
+                    ) or "",
+
+                "City":
+                    child.get(
+                        "city",
+                        "",
+                    ),
+
+                "State":
+                    child.get(
+                        "state",
+                        "",
+                    ),
+
+                "ZIP":
+                    child.get(
+                        "zip_code",
+                        "",
+                    ),
+
+                "First Reconciliation / "
+                "First Communion Prep":
+                    (
+                        "Yes"
+                        if child.get(
+                            "receiving_first_communion_reconciliation",
+                            False,
+                        )
+                        else "No"
+                    ),
+
+                "Confirmation Prep":
+                    (
+                        "Yes"
+                        if child.get(
+                            "receiving_confirmation",
+                            False,
+                        )
+                        else "No"
+                    ),
+
+                "Baptism Status":
+                    child.get(
+                        "baptism_status"
+                    ) or "",
+
+                "First Reconciliation Status":
+                    child.get(
+                        "first_reconciliation_status"
+                    ) or "",
+
+                "First Communion Status":
+                    child.get(
+                        "first_communion_status"
+                    ) or "",
+
+                "Sacramental Follow-up":
+                    (
+                        "Yes"
+                        if follow_up
+                        else "No"
+                    ),
+
+                "Follow-up Reason":
+                    "; ".join(
+                        follow_up
+                    ),
+            }
+        )
+
+    return pd.DataFrame(
+        rows
+    )
 
 
 # ---------------------------------------------------------
@@ -359,7 +643,7 @@ if "existing_household_reference" not in st.session_state:
 
 
 # ---------------------------------------------------------
-# Household verification session state
+# Household verification state
 # ---------------------------------------------------------
 
 if "verification_reference" not in st.session_state:
@@ -373,7 +657,7 @@ if "show_existing_dialog" not in st.session_state:
 
 
 # ---------------------------------------------------------
-# Household ID recovery session state
+# Recovery state
 # ---------------------------------------------------------
 
 if "show_recovery_dialog" not in st.session_state:
@@ -384,7 +668,7 @@ if "recovery_request_sent" not in st.session_state:
 
 
 # ---------------------------------------------------------
-# Admin session state
+# Admin state
 # ---------------------------------------------------------
 
 if "show_admin_dialog" not in st.session_state:
@@ -399,9 +683,15 @@ if "admin_authenticated" not in st.session_state:
 if "admin_email" not in st.session_state:
     st.session_state.admin_email = None
 
+if "admin_detail_child_id" not in st.session_state:
+    st.session_state.admin_detail_child_id = None
+
+if "admin_detail_table_nonce" not in st.session_state:
+    st.session_state.admin_detail_table_nonce = 0
+
 
 # ---------------------------------------------------------
-# Confirmation email session state
+# Confirmation email state
 # ---------------------------------------------------------
 
 if "confirmation_email_sent" not in st.session_state:
@@ -420,10 +710,6 @@ if "confirmation_email_error" not in st.session_state:
 
 @st.dialog("Admin Login")
 def admin_login_dialog():
-
-    # -----------------------------------------------------
-    # Stage 1: Admin email
-    # -----------------------------------------------------
 
     if st.session_state.admin_verification_email is None:
 
@@ -469,9 +755,6 @@ def admin_login_dialog():
 
             try:
 
-                # Store the email regardless of whether it is
-                # authorized so the UI does not reveal which
-                # addresses are on the admin allowlist.
                 st.session_state.admin_verification_email = (
                     admin_email
                 )
@@ -489,11 +772,9 @@ def admin_login_dialog():
                     send_admin_verification_email(
                         recipient=verification["email"],
                         verification_code=verification["code"],
-                        expires_minutes=(
-                            verification[
-                                "expires_minutes"
-                            ]
-                        ),
+                        expires_minutes=verification[
+                            "expires_minutes"
+                        ],
                     )
 
                 st.session_state.show_admin_dialog = True
@@ -510,10 +791,6 @@ def admin_login_dialog():
                 )
 
         return
-
-    # -----------------------------------------------------
-    # Stage 2: Verification code
-    # -----------------------------------------------------
 
     admin_email = (
         st.session_state.admin_verification_email
@@ -580,7 +857,8 @@ def admin_login_dialog():
             elif status == "no_active_code":
 
                 st.error(
-                    "That code is invalid or no longer active."
+                    "That code is invalid or "
+                    "no longer active."
                 )
 
             else:
@@ -590,15 +868,6 @@ def admin_login_dialog():
                 )
 
             return
-
-        # -------------------------------------------------
-        # Extra authorization check
-        # -------------------------------------------------
-        #
-        # The code can only have been generated for an
-        # authorized email, but we check the allowlist again
-        # before creating the admin session.
-        # -------------------------------------------------
 
         if not is_authorized_admin(
             admin_email
@@ -621,10 +890,6 @@ def admin_login_dialog():
 
     st.divider()
 
-    # -----------------------------------------------------
-    # Resend admin code
-    # -----------------------------------------------------
-
     if st.button(
         "Send a New Code",
         use_container_width=True,
@@ -645,11 +910,9 @@ def admin_login_dialog():
                 send_admin_verification_email(
                     recipient=verification["email"],
                     verification_code=verification["code"],
-                    expires_minutes=(
-                        verification[
-                            "expires_minutes"
-                        ]
-                    ),
+                    expires_minutes=verification[
+                        "expires_minutes"
+                    ],
                 )
 
             st.success(
@@ -676,7 +939,392 @@ def admin_login_dialog():
 
 
 # ---------------------------------------------------------
-# Household ID recovery dialog
+# Edit catechists dialog
+# ---------------------------------------------------------
+
+@st.dialog("Edit Catechists")
+def edit_catechists_dialog(
+    group: dict,
+):
+
+    group_key = group[
+        "group_key"
+    ]
+
+    title = roster_title(
+        group_key,
+        group[
+            "display_name"
+        ],
+    )
+
+    st.subheader(
+        title
+    )
+
+    st.caption(
+        "Enter the catechist names as you would like "
+        "them displayed on the roster."
+    )
+
+    catechists = st.text_input(
+        "Catechists",
+        value=group.get(
+            "catechists",
+            "",
+        ),
+        placeholder=(
+            "Jane Smith, John Doe"
+        ),
+        key=(
+            f"catechists_input_"
+            f"{group_key}"
+        ),
+    )
+
+    if st.button(
+        "Save Catechists",
+        type="primary",
+        use_container_width=True,
+        key=(
+            f"save_catechists_"
+            f"{group_key}"
+        ),
+    ):
+
+        try:
+
+            update_roster_group_catechists(
+                group_key,
+                catechists,
+            )
+
+            st.rerun()
+
+        except Exception as exc:
+
+            st.error(
+                "Catechists could not be saved: "
+                f"{exc}"
+            )
+
+
+# ---------------------------------------------------------
+# Admin child detail dialog
+# ---------------------------------------------------------
+
+@st.dialog(
+    "Child Details",
+    width="medium",
+    on_dismiss=clear_admin_child_detail,
+)
+def admin_child_detail_dialog(
+    child: dict,
+):
+
+    child_name = full_name(
+        child.get(
+            "first_name"
+        ),
+        child.get(
+            "middle_name"
+        ),
+        child.get(
+            "last_name"
+        ),
+    )
+
+    age = calculate_age(
+        child[
+            "date_of_birth"
+        ]
+    )
+
+    program = program_name_for_child(
+        child
+    )
+
+    # -----------------------------------------------------
+    # Child
+    # -----------------------------------------------------
+
+    st.subheader(
+        child_name
+    )
+
+    st.write(
+        f"**Grade:** {child['grade']}"
+    )
+
+    st.write(
+        f"**Program:** {program}"
+    )
+
+    st.write(
+        f"**School:** {child['school']}"
+    )
+
+    st.write(
+        f"**Date of Birth:** "
+        f"{child['date_of_birth'].strftime('%m/%d/%Y')} "
+        f"(Age {age})"
+    )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Household
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Household"
+    )
+
+    st.write(
+        "**Household ID**"
+    )
+
+    st.code(
+        child.get(
+            "household_reference",
+            "",
+        ),
+        language=None,
+    )
+
+    # -----------------------------------------------------
+    # Parent A
+    # -----------------------------------------------------
+
+    parent_a = parent_name(
+        child.get(
+            "parent_a_first_name"
+        ),
+        child.get(
+            "parent_a_last_name"
+        ),
+    )
+
+    st.write(
+        "**Parent / Guardian A**"
+    )
+
+    st.write(
+        parent_a
+    )
+
+    st.write(
+        child.get(
+            "parent_a_email",
+            "",
+        )
+    )
+
+    st.write(
+        child.get(
+            "parent_a_phone",
+            "",
+        )
+    )
+
+    # -----------------------------------------------------
+    # Parent B
+    # -----------------------------------------------------
+
+    parent_b = parent_name(
+        child.get(
+            "parent_b_first_name"
+        ),
+        child.get(
+            "parent_b_last_name"
+        ),
+    )
+
+    parent_b_email = (
+        child.get(
+            "parent_b_email"
+        )
+        or ""
+    )
+
+    parent_b_phone = (
+        child.get(
+            "parent_b_phone"
+        )
+        or ""
+    )
+
+    if (
+        parent_b
+        or parent_b_email
+        or parent_b_phone
+    ):
+
+        st.write("")
+
+        st.write(
+            "**Parent / Guardian B**"
+        )
+
+        if parent_b:
+
+            st.write(
+                parent_b
+            )
+
+        if parent_b_email:
+
+            st.write(
+                parent_b_email
+            )
+
+        if parent_b_phone:
+
+            st.write(
+                parent_b_phone
+            )
+
+    # -----------------------------------------------------
+    # Address
+    # -----------------------------------------------------
+
+    st.write("")
+
+    st.write(
+        "**Home Address**"
+    )
+
+    st.write(
+        child.get(
+            "address_line_1",
+            "",
+        )
+    )
+
+    if child.get(
+        "address_line_2"
+    ):
+
+        st.write(
+            child[
+                "address_line_2"
+            ]
+        )
+
+    st.write(
+        f"{child.get('city', '')}, "
+        f"{child.get('state', '')} "
+        f"{child.get('zip_code', '')}"
+    )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Sacrament preparation
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Sacrament Preparation"
+    )
+
+    preparation = (
+        sacrament_preparation_labels(
+            child
+        )
+    )
+
+    if preparation:
+
+        for item in preparation:
+
+            st.write(
+                f"✓ {item}"
+            )
+
+    else:
+
+        st.caption(
+            "No sacrament preparation selected."
+        )
+
+    # -----------------------------------------------------
+    # Sacramental history
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Sacramental History"
+    )
+
+    baptism = (
+        child.get(
+            "baptism_status"
+        )
+        or "—"
+    )
+
+    reconciliation = (
+        child.get(
+            "first_reconciliation_status"
+        )
+        or "—"
+    )
+
+    communion = (
+        child.get(
+            "first_communion_status"
+        )
+        or "—"
+    )
+
+    st.write(
+        f"**Baptized:** {baptism}"
+    )
+
+    st.write(
+        f"**First Reconciliation:** "
+        f"{reconciliation}"
+    )
+
+    st.write(
+        f"**First Communion:** "
+        f"{communion}"
+    )
+
+    # -----------------------------------------------------
+    # Follow-up
+    # -----------------------------------------------------
+
+    follow_up_reasons = (
+        sacramental_follow_up_reasons(
+            child
+        )
+    )
+
+    if follow_up_reasons:
+
+        st.warning(
+            "**Sacramental follow-up needed**\n\n"
+            + "\n\n".join(
+                f"• {reason}"
+                for reason in follow_up_reasons
+            )
+        )
+
+    st.divider()
+
+    if st.button(
+        "Close",
+        type="primary",
+        use_container_width=True,
+    ):
+
+        clear_admin_child_detail()
+
+        st.rerun()
+
+
+# ---------------------------------------------------------
+# Household ID recovery
 # ---------------------------------------------------------
 
 @st.dialog("Recover Household ID")
@@ -754,7 +1402,9 @@ def recover_household_id_dialog():
 
             return
 
-        if not is_valid_email(email):
+        if not is_valid_email(
+            email
+        ):
 
             st.error(
                 "Please enter a valid email address."
@@ -796,10 +1446,6 @@ def recover_household_id_dialog():
 
 @st.dialog("Return to Existing Household")
 def existing_household_dialog():
-
-    # -----------------------------------------------------
-    # Stage 1: Household ID
-    # -----------------------------------------------------
 
     if st.session_state.verification_reference is None:
 
@@ -847,16 +1493,12 @@ def existing_household_dialog():
                 send_verification_email(
                     recipient=verification["email"],
                     verification_code=verification["code"],
-                    household_reference=(
-                        verification[
-                            "household_reference"
-                        ]
-                    ),
-                    expires_minutes=(
-                        verification[
-                            "expires_minutes"
-                        ]
-                    ),
+                    household_reference=verification[
+                        "household_reference"
+                    ],
+                    expires_minutes=verification[
+                        "expires_minutes"
+                    ],
                 )
 
                 st.session_state.verification_reference = (
@@ -866,7 +1508,9 @@ def existing_household_dialog():
                 )
 
                 st.session_state.verification_email = (
-                    verification["email"]
+                    verification[
+                        "email"
+                    ]
                 )
 
                 st.session_state.show_existing_dialog = True
@@ -894,10 +1538,6 @@ def existing_household_dialog():
             st.rerun()
 
         return
-
-    # -----------------------------------------------------
-    # Stage 2: Verification code
-    # -----------------------------------------------------
 
     household_reference = (
         st.session_state.verification_reference
@@ -996,53 +1636,83 @@ def existing_household_dialog():
         st.session_state.household = {
 
             "parent_a_first_name":
-                household["parent_a_first_name"],
+                household[
+                    "parent_a_first_name"
+                ],
 
             "parent_a_last_name":
-                household["parent_a_last_name"],
+                household[
+                    "parent_a_last_name"
+                ],
 
             "parent_a_email":
-                household["parent_a_email"],
+                household[
+                    "parent_a_email"
+                ],
 
             "parent_a_phone":
-                household["parent_a_phone"],
+                household[
+                    "parent_a_phone"
+                ],
 
             "parent_b_first_name":
-                household["parent_b_first_name"] or "",
+                household[
+                    "parent_b_first_name"
+                ] or "",
 
             "parent_b_last_name":
-                household["parent_b_last_name"] or "",
+                household[
+                    "parent_b_last_name"
+                ] or "",
 
             "parent_b_email":
-                household["parent_b_email"] or "",
+                household[
+                    "parent_b_email"
+                ] or "",
 
             "parent_b_phone":
-                household["parent_b_phone"] or "",
+                household[
+                    "parent_b_phone"
+                ] or "",
 
             "address_line_1":
-                household["address_line_1"],
+                household[
+                    "address_line_1"
+                ],
 
             "address_line_2":
-                household["address_line_2"] or "",
+                household[
+                    "address_line_2"
+                ] or "",
 
             "city":
-                household["city"],
+                household[
+                    "city"
+                ],
 
             "state":
-                household["state"],
+                household[
+                    "state"
+                ],
 
             "zip_code":
-                household["zip_code"],
+                household[
+                    "zip_code"
+                ],
         }
 
         st.session_state.children = children
 
         st.session_state.existing_household_id = (
-            household["household_id"]
+            household[
+                "household_id"
+            ]
         )
 
         st.session_state.existing_household_reference = (
-            household["household_reference"]
+            household[
+                "household_reference"
+            ]
         )
 
         st.session_state.registration_mode = (
@@ -1081,20 +1751,18 @@ def existing_household_dialog():
             send_verification_email(
                 recipient=verification["email"],
                 verification_code=verification["code"],
-                household_reference=(
-                    verification[
-                        "household_reference"
-                    ]
-                ),
-                expires_minutes=(
-                    verification[
-                        "expires_minutes"
-                    ]
-                ),
+                household_reference=verification[
+                    "household_reference"
+                ],
+                expires_minutes=verification[
+                    "expires_minutes"
+                ],
             )
 
             st.session_state.verification_email = (
-                verification["email"]
+                verification[
+                    "email"
+                ]
             )
 
             st.success(
@@ -1136,10 +1804,6 @@ def household_dialog():
         "household_form",
         enter_to_submit=False,
     ):
-
-        # -------------------------------------------------
-        # Parent / Guardian A
-        # -------------------------------------------------
 
         st.subheader(
             "Parent / Guardian A"
@@ -1194,10 +1858,6 @@ def household_dialog():
             )
 
         st.divider()
-
-        # -------------------------------------------------
-        # Parent / Guardian B
-        # -------------------------------------------------
 
         st.subheader(
             "Parent / Guardian B"
@@ -1256,10 +1916,6 @@ def household_dialog():
             )
 
         st.divider()
-
-        # -------------------------------------------------
-        # Address
-        # -------------------------------------------------
 
         st.subheader(
             "Home Address"
@@ -1524,12 +2180,15 @@ def child_dialog(
     )
 
     if editing:
+
         child = (
             st.session_state.children[
                 child_index
             ]
         )
+
     else:
+
         child = {}
 
     household = (
@@ -1566,12 +2225,13 @@ def child_dialog(
     )
 
     try:
-        grade_index = (
-            grades.index(
-                existing_grade
-            )
+
+        grade_index = grades.index(
+            existing_grade
         )
+
     except ValueError:
+
         grade_index = 0
 
     sacrament_status_options = [
@@ -1580,10 +2240,6 @@ def child_dialog(
         "No",
         "Not sure",
     ]
-
-    # -----------------------------------------------------
-    # Basic information
-    # -----------------------------------------------------
 
     st.subheader(
         "Basic Information"
@@ -1644,10 +2300,6 @@ def child_dialog(
 
     st.divider()
 
-    # -----------------------------------------------------
-    # Sacrament preparation
-    # -----------------------------------------------------
-
     st.subheader(
         "Sacrament Preparation"
     )
@@ -1677,10 +2329,6 @@ def child_dialog(
             ),
         )
     )
-
-    # -----------------------------------------------------
-    # Sacramental history
-    # -----------------------------------------------------
 
     baptism_status = None
     first_reconciliation_status = None
@@ -1743,6 +2391,7 @@ def child_dialog(
             )
 
         preview_child = {
+
             "receiving_first_communion_reconciliation":
                 receiving_first_communion_reconciliation,
 
@@ -1819,10 +2468,6 @@ def child_dialog(
         use_container_width=True,
     ):
 
-        # -------------------------------------------------
-        # Basic validation
-        # -------------------------------------------------
-
         if not first_name.strip():
 
             st.error(
@@ -1863,10 +2508,6 @@ def child_dialog(
 
             return
 
-        # -------------------------------------------------
-        # Sacramental history validation
-        # -------------------------------------------------
-
         if sacramental_history_needed:
 
             if baptism_status == "Select one":
@@ -1903,10 +2544,6 @@ def child_dialog(
                 )
 
                 return
-
-        # -------------------------------------------------
-        # Preserve existing sacramental history
-        # -------------------------------------------------
 
         if sacramental_history_needed:
 
@@ -2125,21 +2762,10 @@ def review_dialog():
 
     for child in children:
 
-        full_name = " ".join(
-            part
-            for part in [
-                child[
-                    "first_name"
-                ],
-                child.get(
-                    "middle_name",
-                    "",
-                ),
-                child[
-                    "last_name"
-                ],
-            ]
-            if part
+        child_name = full_name(
+            child.get("first_name"),
+            child.get("middle_name"),
+            child.get("last_name"),
         )
 
         age = calculate_age(
@@ -2149,7 +2775,7 @@ def review_dialog():
         )
 
         st.write(
-            f"**{full_name}**"
+            f"**{child_name}**"
         )
 
         st.caption(
@@ -2260,10 +2886,6 @@ def review_dialog():
 
         try:
 
-            # -----------------------------------------
-            # Existing household
-            # -----------------------------------------
-
             if editing_existing:
 
                 update_registration(
@@ -2314,10 +2936,6 @@ def review_dialog():
                     st.session_state.confirmation_email_error = (
                         str(email_exc)
                     )
-
-            # -----------------------------------------
-            # New household
-            # -----------------------------------------
 
             else:
 
@@ -2379,40 +2997,258 @@ def review_dialog():
 
 
 # ---------------------------------------------------------
-# Admin success page
+# Roster card
+# ---------------------------------------------------------
+
+def render_roster_card(
+    group: dict,
+    roster: list[dict],
+) -> None:
+
+    group_key = group[
+        "group_key"
+    ]
+
+    title = roster_title(
+        group_key,
+        group[
+            "display_name"
+        ],
+    )
+
+    group_children = [
+        child
+        for child in roster
+        if roster_group_key_for_grade(
+            child[
+                "grade"
+            ]
+        ) == group_key
+    ]
+
+    with st.container(
+        border=True
+    ):
+
+        title_col, edit_col = (
+            st.columns(
+                [5, 1.2],
+                vertical_alignment="center",
+            )
+        )
+
+        with title_col:
+
+            st.subheader(
+                f"{title}  ·  "
+                f"{len(group_children)}"
+            )
+
+        with edit_col:
+
+            if st.button(
+                "Edit",
+                key=(
+                    f"edit_catechists_"
+                    f"{group_key}"
+                ),
+                use_container_width=True,
+            ):
+
+                edit_catechists_dialog(
+                    group
+                )
+
+        catechists = (
+            group.get(
+                "catechists",
+                "",
+            )
+            .strip()
+        )
+
+        if catechists:
+
+            st.write(
+                f"**Catechists:** {catechists}"
+            )
+
+        else:
+
+            st.caption(
+                "Catechists: Not assigned"
+            )
+
+        st.write("")
+
+        if not group_children:
+
+            st.info(
+                "No children are currently "
+                "registered in this roster."
+            )
+
+            return
+
+        rows = []
+
+        for child in group_children:
+
+            child_name = full_name(
+                child.get(
+                    "first_name"
+                ),
+                child.get(
+                    "middle_name"
+                ),
+                child.get(
+                    "last_name"
+                ),
+            )
+
+            # Kindergarten shows grade because the
+            # roster includes both Pre-K and K.
+            #
+            # EDGE and Life Teen also show grade because
+            # each roster contains several grade levels.
+            if group_key in (
+                "kindergarten",
+                "edge",
+                "life_teen",
+            ):
+
+                rows.append(
+                    {
+                        "Child":
+                            child_name,
+
+                        "Grade":
+                            child[
+                                "grade"
+                            ],
+
+                        "School":
+                            child[
+                                "school"
+                            ],
+                    }
+                )
+
+            else:
+
+                rows.append(
+                    {
+                        "Child":
+                            child_name,
+
+                        "School":
+                            child[
+                                "school"
+                            ],
+                    }
+                )
+
+        display_df = pd.DataFrame(
+            rows
+        )
+
+        st.caption(
+            "Select a child to view details."
+        )
+
+        table_event = st.dataframe(
+            display_df,
+            hide_index=True,
+            use_container_width=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key=(
+                f"roster_table_"
+                f"{group_key}_"
+                f"{st.session_state.admin_detail_table_nonce}"
+            ),
+        )
+
+        selected_rows = (
+            table_event
+            .selection
+            .rows
+        )
+
+        if selected_rows:
+
+            selected_index = (
+                selected_rows[0]
+            )
+
+            if (
+                0
+                <= selected_index
+                < len(group_children)
+            ):
+
+                selected_child = (
+                    group_children[
+                        selected_index
+                    ]
+                )
+
+                st.session_state.admin_detail_child_id = (
+                    selected_child[
+                        "child_id"
+                    ]
+                )
+
+        export_df = (
+            build_export_dataframe(
+                group_children
+            )
+        )
+
+        csv_data = (
+            export_df
+            .to_csv(
+                index=False
+            )
+            .encode(
+                "utf-8-sig"
+            )
+        )
+
+        file_group_name = (
+            group_key
+            .replace(
+                "_",
+                "-"
+            )
+        )
+
+        st.download_button(
+            f"Download {title} Roster",
+            data=csv_data,
+            file_name=(
+                f"ascension-"
+                f"{file_group_name}-"
+                f"roster.csv"
+            ),
+            mime="text/csv",
+            key=(
+                f"download_roster_"
+                f"{group_key}"
+            ),
+            use_container_width=True,
+        )
+
+
+# ---------------------------------------------------------
+# Admin dashboard
 # ---------------------------------------------------------
 
 if st.session_state.admin_authenticated:
 
-    st.title(
-        "Ascension Registration"
-    )
-
-    st.subheader(
-        "Admin"
-    )
-
-    st.success(
-        "Admin Login Successful"
-    )
-
-    st.write(
-        "Signed in as:"
-    )
-
-    st.write(
-        f"**{st.session_state.admin_email}**"
-    )
-
-    st.info(
-        "The administrative dashboard will be built here."
-    )
-
-    st.divider()
-
-    if st.button(
-        "Log Out",
-        use_container_width=True,
+    if not is_authorized_admin(
+        st.session_state.admin_email
+        or ""
     ):
 
         st.session_state.admin_authenticated = False
@@ -2421,6 +3257,757 @@ if st.session_state.admin_authenticated:
         clear_admin_login_state()
 
         st.rerun()
+
+    # -----------------------------------------------------
+    # Header
+    # -----------------------------------------------------
+
+    title_col, logout_col = (
+        st.columns(
+            [5, 1.25],
+            vertical_alignment="center",
+        )
+    )
+
+    with title_col:
+
+        st.title(
+            "Ascension Registration"
+        )
+
+        st.caption(
+            f"Admin Dashboard • "
+            f"{st.session_state.admin_email}"
+        )
+
+    with logout_col:
+
+        if st.button(
+            "Log Out",
+            use_container_width=True,
+        ):
+
+            st.session_state.admin_authenticated = False
+            st.session_state.admin_email = None
+
+            clear_admin_login_state()
+            clear_admin_child_detail()
+
+            st.rerun()
+
+    # -----------------------------------------------------
+    # Load admin data
+    # -----------------------------------------------------
+
+    try:
+
+        roster = get_admin_roster()
+
+        roster_groups = (
+            get_roster_groups()
+        )
+
+    except Exception as exc:
+
+        st.error(
+            "Administrative data could not "
+            f"be loaded: {exc}"
+        )
+
+        st.stop()
+
+    # -----------------------------------------------------
+    # Registration overview
+    # -----------------------------------------------------
+
+    st.header(
+        "Registration Overview"
+    )
+
+    total_children = len(
+        roster
+    )
+
+    total_households = len(
+        {
+            child[
+                "household_reference"
+            ]
+            for child in roster
+        }
+    )
+
+    first_communion_count = sum(
+        1
+        for child in roster
+        if child.get(
+            "receiving_first_communion_reconciliation",
+            False,
+        )
+    )
+
+    confirmation_count = sum(
+        1
+        for child in roster
+        if child.get(
+            "receiving_confirmation",
+            False,
+        )
+    )
+
+    follow_up_count = sum(
+        1
+        for child in roster
+        if sacramental_follow_up_reasons(
+            child
+        )
+    )
+
+    (
+        metric_1,
+        metric_2,
+        metric_3,
+        metric_4,
+        metric_5,
+    ) = st.columns(5)
+
+    with metric_1:
+
+        st.metric(
+            "Children",
+            total_children,
+        )
+
+    with metric_2:
+
+        st.metric(
+            "Households",
+            total_households,
+        )
+
+    with metric_3:
+
+        st.metric(
+            "First Communion",
+            first_communion_count,
+        )
+
+    with metric_4:
+
+        st.metric(
+            "Confirmation",
+            confirmation_count,
+        )
+
+    with metric_5:
+
+        st.metric(
+            "Follow-up",
+            follow_up_count,
+        )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # PSR rosters
+    # -----------------------------------------------------
+
+    st.header(
+        "PSR Rosters"
+    )
+
+    psr_groups = [
+        group
+        for group in roster_groups
+        if group[
+            "category"
+        ] == "PSR"
+    ]
+
+    for group in psr_groups:
+
+        render_roster_card(
+            group,
+            roster,
+        )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Youth Ministry rosters
+    # -----------------------------------------------------
+
+    st.header(
+        "Youth Ministry Rosters"
+    )
+
+    youth_groups = [
+        group
+        for group in roster_groups
+        if group[
+            "category"
+        ] == "Youth Ministry"
+    ]
+
+    for group in youth_groups:
+
+        render_roster_card(
+            group,
+            roster,
+        )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Sacramental preparation
+    # -----------------------------------------------------
+
+    st.header(
+        "Sacramental Preparation"
+    )
+
+    first_communion_children = [
+        child
+        for child in roster
+        if child.get(
+            "receiving_first_communion_reconciliation",
+            False,
+        )
+    ]
+
+    confirmation_children = [
+        child
+        for child in roster
+        if child.get(
+            "receiving_confirmation",
+            False,
+        )
+    ]
+
+    follow_up_children = [
+        child
+        for child in roster
+        if sacramental_follow_up_reasons(
+            child
+        )
+    ]
+
+    # -----------------------------------------------------
+    # First Communion / Reconciliation
+    # -----------------------------------------------------
+
+    with st.expander(
+        "First Reconciliation / "
+        f"First Communion ({len(first_communion_children)})"
+    ):
+
+        if not first_communion_children:
+
+            st.info(
+                "No children are currently registered "
+                "for First Reconciliation / First Communion."
+            )
+
+        else:
+
+            rows = []
+
+            for child in first_communion_children:
+
+                rows.append(
+                    {
+                        "Child":
+                            full_name(
+                                child.get(
+                                    "first_name"
+                                ),
+                                child.get(
+                                    "middle_name"
+                                ),
+                                child.get(
+                                    "last_name"
+                                ),
+                            ),
+
+                        "Grade":
+                            child[
+                                "grade"
+                            ],
+
+                        "School":
+                            child[
+                                "school"
+                            ],
+
+                        "Baptized":
+                            child.get(
+                                "baptism_status"
+                            )
+                            or "",
+                    }
+                )
+
+            st.dataframe(
+                pd.DataFrame(
+                    rows
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            export_df = (
+                build_export_dataframe(
+                    first_communion_children
+                )
+            )
+
+            st.download_button(
+                "Download First Communion Roster",
+                data=(
+                    export_df
+                    .to_csv(
+                        index=False
+                    )
+                    .encode(
+                        "utf-8-sig"
+                    )
+                ),
+                file_name=(
+                    "ascension-first-communion-"
+                    "roster.csv"
+                ),
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+    # -----------------------------------------------------
+    # Confirmation
+    # -----------------------------------------------------
+
+    with st.expander(
+        f"Confirmation ({len(confirmation_children)})"
+    ):
+
+        if not confirmation_children:
+
+            st.info(
+                "No children are currently registered "
+                "for Confirmation."
+            )
+
+        else:
+
+            rows = []
+
+            for child in confirmation_children:
+
+                rows.append(
+                    {
+                        "Child":
+                            full_name(
+                                child.get(
+                                    "first_name"
+                                ),
+                                child.get(
+                                    "middle_name"
+                                ),
+                                child.get(
+                                    "last_name"
+                                ),
+                            ),
+
+                        "Grade":
+                            child[
+                                "grade"
+                            ],
+
+                        "School":
+                            child[
+                                "school"
+                            ],
+
+                        "Baptized":
+                            child.get(
+                                "baptism_status"
+                            )
+                            or "",
+
+                        "Reconciliation":
+                            child.get(
+                                "first_reconciliation_status"
+                            )
+                            or "",
+
+                        "Communion":
+                            child.get(
+                                "first_communion_status"
+                            )
+                            or "",
+                    }
+                )
+
+            st.dataframe(
+                pd.DataFrame(
+                    rows
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            export_df = (
+                build_export_dataframe(
+                    confirmation_children
+                )
+            )
+
+            st.download_button(
+                "Download Confirmation Roster",
+                data=(
+                    export_df
+                    .to_csv(
+                        index=False
+                    )
+                    .encode(
+                        "utf-8-sig"
+                    )
+                ),
+                file_name=(
+                    "ascension-confirmation-"
+                    "roster.csv"
+                ),
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+    # -----------------------------------------------------
+    # Follow-up
+    # -----------------------------------------------------
+
+    with st.expander(
+        f"Sacramental Follow-up Needed "
+        f"({len(follow_up_children)})"
+    ):
+
+        if not follow_up_children:
+
+            st.success(
+                "No sacramental follow-up cases "
+                "are currently flagged."
+            )
+
+        else:
+
+            rows = []
+
+            for child in follow_up_children:
+
+                reasons = (
+                    sacramental_follow_up_reasons(
+                        child
+                    )
+                )
+
+                rows.append(
+                    {
+                        "Child":
+                            full_name(
+                                child.get(
+                                    "first_name"
+                                ),
+                                child.get(
+                                    "middle_name"
+                                ),
+                                child.get(
+                                    "last_name"
+                                ),
+                            ),
+
+                        "Grade":
+                            child[
+                                "grade"
+                            ],
+
+                        "School":
+                            child[
+                                "school"
+                            ],
+
+                        "Follow-up Reason":
+                            "; ".join(
+                                reasons
+                            ),
+
+                        "Parent":
+                            parent_name(
+                                child.get(
+                                    "parent_a_first_name"
+                                ),
+                                child.get(
+                                    "parent_a_last_name"
+                                ),
+                            ),
+
+                        "Email":
+                            child.get(
+                                "parent_a_email",
+                                "",
+                            ),
+
+                        "Phone":
+                            child.get(
+                                "parent_a_phone",
+                                "",
+                            ),
+                    }
+                )
+
+            st.dataframe(
+                pd.DataFrame(
+                    rows
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            export_df = (
+                build_export_dataframe(
+                    follow_up_children
+                )
+            )
+
+            st.download_button(
+                "Download Follow-up List",
+                data=(
+                    export_df
+                    .to_csv(
+                        index=False
+                    )
+                    .encode(
+                        "utf-8-sig"
+                    )
+                ),
+                file_name=(
+                    "ascension-sacramental-"
+                    "follow-up.csv"
+                ),
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Full registration data
+    # -----------------------------------------------------
+
+    st.header(
+        "All Registrations"
+    )
+
+    with st.expander(
+        "View / Export Full Registration Data"
+    ):
+
+        search_text = st.text_input(
+            "Search registrations",
+            placeholder=(
+                "Child, parent, school, email, "
+                "or Household ID"
+            ),
+        )
+
+        search_value = (
+            search_text
+            .strip()
+            .lower()
+        )
+
+        filtered = []
+
+        for child in roster:
+
+            child_name = full_name(
+                child.get(
+                    "first_name"
+                ),
+                child.get(
+                    "middle_name"
+                ),
+                child.get(
+                    "last_name"
+                ),
+            )
+
+            parent_a = parent_name(
+                child.get(
+                    "parent_a_first_name"
+                ),
+                child.get(
+                    "parent_a_last_name"
+                ),
+            )
+
+            parent_b = parent_name(
+                child.get(
+                    "parent_b_first_name"
+                ),
+                child.get(
+                    "parent_b_last_name"
+                ),
+            )
+
+            searchable = " ".join(
+                [
+                    child_name,
+                    parent_a,
+                    parent_b,
+                    child.get(
+                        "school"
+                    ) or "",
+                    child.get(
+                        "parent_a_email"
+                    ) or "",
+                    child.get(
+                        "parent_b_email"
+                    ) or "",
+                    child.get(
+                        "household_reference"
+                    ) or "",
+                ]
+            ).lower()
+
+            if (
+                search_value
+                and search_value
+                not in searchable
+            ):
+                continue
+
+            filtered.append(
+                child
+            )
+
+        st.caption(
+            f"{len(filtered)} registration"
+            f"{'' if len(filtered) == 1 else 's'} shown"
+        )
+
+        if filtered:
+
+            simple_rows = []
+
+            for child in filtered:
+
+                simple_rows.append(
+                    {
+                        "Child":
+                            full_name(
+                                child.get(
+                                    "first_name"
+                                ),
+                                child.get(
+                                    "middle_name"
+                                ),
+                                child.get(
+                                    "last_name"
+                                ),
+                            ),
+
+                        "Grade":
+                            child[
+                                "grade"
+                            ],
+
+                        "School":
+                            child[
+                                "school"
+                            ],
+
+                        "Household ID":
+                            child[
+                                "household_reference"
+                            ],
+
+                        "Parent":
+                            parent_name(
+                                child.get(
+                                    "parent_a_first_name"
+                                ),
+                                child.get(
+                                    "parent_a_last_name"
+                                ),
+                            ),
+                    }
+                )
+
+            st.dataframe(
+                pd.DataFrame(
+                    simple_rows
+                ),
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            full_export = (
+                build_export_dataframe(
+                    filtered
+                )
+            )
+
+            st.download_button(
+                "Download Current Registration Data",
+                data=(
+                    full_export
+                    .to_csv(
+                        index=False
+                    )
+                    .encode(
+                        "utf-8-sig"
+                    )
+                ),
+                file_name=(
+                    "ascension-registration-data.csv"
+                ),
+                mime="text/csv",
+                use_container_width=True,
+            )
+
+        else:
+
+            st.info(
+                "No registrations match your search."
+            )
+
+    # -----------------------------------------------------
+    # Open selected child
+    # -----------------------------------------------------
+
+    if (
+        st.session_state.admin_detail_child_id
+        is not None
+    ):
+
+        selected_child = next(
+            (
+                child
+                for child in roster
+                if child[
+                    "child_id"
+                ]
+                == st.session_state.admin_detail_child_id
+            ),
+            None,
+        )
+
+        if selected_child is not None:
+
+            admin_child_detail_dialog(
+                selected_child
+            )
+
+        else:
+
+            clear_admin_child_detail()
 
     st.stop()
 
@@ -2550,10 +4137,6 @@ if (
 
     col1, col2 = st.columns(2)
 
-    # -----------------------------------------------------
-    # New registration
-    # -----------------------------------------------------
-
     with col1:
 
         if st.button(
@@ -2580,10 +4163,6 @@ if (
 
             st.rerun()
 
-    # -----------------------------------------------------
-    # Existing registration
-    # -----------------------------------------------------
-
     with col2:
 
         if st.button(
@@ -2597,10 +4176,6 @@ if (
             st.session_state.show_existing_dialog = True
 
             st.rerun()
-
-    # -----------------------------------------------------
-    # Recover Household ID
-    # -----------------------------------------------------
 
     st.write("")
 
@@ -2620,10 +4195,6 @@ if (
 
         st.rerun()
 
-    # -----------------------------------------------------
-    # Admin login
-    # -----------------------------------------------------
-
     st.divider()
 
     if st.button(
@@ -2637,10 +4208,6 @@ if (
         st.session_state.show_admin_dialog = True
 
         st.rerun()
-
-    # -----------------------------------------------------
-    # Open exactly one dialog per run
-    # -----------------------------------------------------
 
     if st.session_state.show_existing_dialog:
 
@@ -2825,25 +4392,20 @@ else:
 
             with name_col:
 
-                full_name = " ".join(
-                    part
-                    for part in [
-                        child[
-                            "first_name"
-                        ],
-                        child.get(
-                            "middle_name",
-                            "",
-                        ),
-                        child[
-                            "last_name"
-                        ],
-                    ]
-                    if part
+                child_name = full_name(
+                    child.get(
+                        "first_name"
+                    ),
+                    child.get(
+                        "middle_name"
+                    ),
+                    child.get(
+                        "last_name"
+                    ),
                 )
 
                 st.subheader(
-                    full_name
+                    child_name
                 )
 
                 age = calculate_age(

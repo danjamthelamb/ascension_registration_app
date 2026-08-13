@@ -1,4 +1,5 @@
 from datetime import date
+import re
 
 import streamlit as st
 
@@ -36,6 +37,103 @@ def calculate_age(date_of_birth: date) -> int:
         age -= 1
 
     return age
+
+
+def is_valid_email(email: str) -> bool:
+    """
+    Practical email validation.
+
+    Accepts:
+        name@example.com
+        first.last@example.com
+        name+tag@example.com
+
+    Rejects:
+        name#example,com
+        name@example
+        name @example.com
+    """
+
+    email = email.strip()
+
+    pattern = (
+        r"^[A-Za-z0-9._%+-]+"
+        r"@[A-Za-z0-9-]+"
+        r"(?:\.[A-Za-z0-9-]+)+$"
+    )
+
+    return re.fullmatch(pattern, email) is not None
+
+
+def normalize_phone(phone: str) -> str | None:
+    """
+    Validate and normalize a US phone number.
+
+    Accepts:
+        3045551234
+        304-555-1234
+        (304) 555-1234
+        1-304-555-1234
+
+    Returns:
+        (304) 555-1234
+    """
+
+    digits = re.sub(r"\D", "", phone)
+
+    # Allow optional US country code.
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+
+    if len(digits) != 10:
+        return None
+
+    # US area codes and exchanges cannot begin with 0 or 1.
+    if digits[0] in "01":
+        return None
+
+    if digits[3] in "01":
+        return None
+
+    return (
+        f"({digits[:3]}) "
+        f"{digits[3:6]}-"
+        f"{digits[6:]}"
+    )
+
+
+def normalize_zip(zip_code: str) -> str | None:
+    """
+    Validate and normalize a US ZIP code.
+
+    Accepts:
+        25033
+        250331234
+        25033-1234
+
+    Returns:
+        25033
+        25033-1234
+    """
+
+    zip_code = zip_code.strip()
+
+    if re.fullmatch(r"\d{5}", zip_code):
+        return zip_code
+
+    if re.fullmatch(r"\d{9}", zip_code):
+        return (
+            f"{zip_code[:5]}-"
+            f"{zip_code[5:]}"
+        )
+
+    if re.fullmatch(
+        r"\d{5}-\d{4}",
+        zip_code,
+    ):
+        return zip_code
+
+    return None
 
 
 def mask_email(email: str) -> str:
@@ -238,18 +336,22 @@ def recover_household_id_dialog():
         use_container_width=True,
     ):
 
-        email = email.strip().lower()
+        email = email.strip()
 
         if not email:
+
             st.error(
                 "Please enter your email address."
             )
+
             return
 
-        if "@" not in email:
+        if not is_valid_email(email):
+
             st.error(
                 "Please enter a valid email address."
             )
+
             return
 
         try:
@@ -260,12 +362,11 @@ def recover_household_id_dialog():
                 )
             )
 
-            # IMPORTANT:
-            # We only send an email if the address
-            # actually exists in our database.
+            # Only send an email when the address
+            # actually exists in the database.
             #
-            # However, the message shown to the user
-            # is identical whether or not a match exists.
+            # The user-facing response stays the same
+            # whether or not a match exists.
             if references:
 
                 send_household_id_recovery(
@@ -280,8 +381,6 @@ def recover_household_id_dialog():
 
         except Exception:
 
-            # Do not reveal whether the email address
-            # exists in our registration database.
             st.error(
                 "We couldn't process the recovery request "
                 "right now. Please try again."
@@ -675,6 +774,10 @@ def household_dialog():
         enter_to_submit=False,
     ):
 
+        # -------------------------------------------------
+        # Parent / Guardian A
+        # -------------------------------------------------
+
         st.subheader(
             "Parent / Guardian A"
         )
@@ -728,6 +831,10 @@ def household_dialog():
             )
 
         st.divider()
+
+        # -------------------------------------------------
+        # Parent / Guardian B
+        # -------------------------------------------------
 
         st.subheader(
             "Parent / Guardian B"
@@ -786,6 +893,10 @@ def household_dialog():
             )
 
         st.divider()
+
+        # -------------------------------------------------
+        # Address
+        # -------------------------------------------------
 
         st.subheader(
             "Home Address"
@@ -852,6 +963,10 @@ def household_dialog():
 
         if submitted:
 
+            # ---------------------------------------------
+            # Required field validation
+            # ---------------------------------------------
+
             required_fields = {
 
                 "Parent / Guardian A first name":
@@ -895,6 +1010,130 @@ def household_dialog():
 
                 return
 
+            # ---------------------------------------------
+            # Parent A email
+            # ---------------------------------------------
+
+            if not is_valid_email(
+                parent_a_email
+            ):
+
+                st.error(
+                    "Please enter a valid email address "
+                    "for Parent / Guardian A."
+                )
+
+                return
+
+            # ---------------------------------------------
+            # Parent B email
+            # ---------------------------------------------
+
+            if (
+                parent_b_email.strip()
+                and not is_valid_email(
+                    parent_b_email
+                )
+            ):
+
+                st.error(
+                    "Please enter a valid email address "
+                    "for Parent / Guardian B."
+                )
+
+                return
+
+            # ---------------------------------------------
+            # Parent A phone
+            # ---------------------------------------------
+
+            parent_a_phone_formatted = (
+                normalize_phone(
+                    parent_a_phone
+                )
+            )
+
+            if (
+                parent_a_phone_formatted
+                is None
+            ):
+
+                st.error(
+                    "Please enter a valid 10-digit "
+                    "phone number for Parent / Guardian A."
+                )
+
+                return
+
+            # ---------------------------------------------
+            # Parent B phone
+            # ---------------------------------------------
+
+            parent_b_phone_formatted = None
+
+            if parent_b_phone.strip():
+
+                parent_b_phone_formatted = (
+                    normalize_phone(
+                        parent_b_phone
+                    )
+                )
+
+                if (
+                    parent_b_phone_formatted
+                    is None
+                ):
+
+                    st.error(
+                        "Please enter a valid 10-digit "
+                        "phone number for Parent / Guardian B."
+                    )
+
+                    return
+
+            # ---------------------------------------------
+            # ZIP code
+            # ---------------------------------------------
+
+            zip_code_formatted = (
+                normalize_zip(
+                    zip_code
+                )
+            )
+
+            if zip_code_formatted is None:
+
+                st.error(
+                    "Please enter a valid ZIP code "
+                    "such as 25033 or 25033-1234."
+                )
+
+                return
+
+            # ---------------------------------------------
+            # State
+            # ---------------------------------------------
+
+            state_formatted = (
+                state.strip().upper()
+            )
+
+            if not re.fullmatch(
+                r"[A-Z]{2}",
+                state_formatted,
+            ):
+
+                st.error(
+                    "Please enter a valid two-letter "
+                    "state abbreviation."
+                )
+
+                return
+
+            # ---------------------------------------------
+            # Save to session
+            # ---------------------------------------------
+
             st.session_state.household = {
 
                 "parent_a_first_name":
@@ -907,7 +1146,7 @@ def household_dialog():
                     parent_a_email.strip(),
 
                 "parent_a_phone":
-                    parent_a_phone.strip(),
+                    parent_a_phone_formatted,
 
                 "parent_b_first_name":
                     parent_b_first_name.strip(),
@@ -919,7 +1158,7 @@ def household_dialog():
                     parent_b_email.strip(),
 
                 "parent_b_phone":
-                    parent_b_phone.strip(),
+                    parent_b_phone_formatted or "",
 
                 "address_line_1":
                     address_line_1.strip(),
@@ -931,10 +1170,10 @@ def household_dialog():
                     city.strip(),
 
                 "state":
-                    state.strip().upper(),
+                    state_formatted,
 
                 "zip_code":
-                    zip_code.strip(),
+                    zip_code_formatted,
             }
 
             st.rerun()
@@ -1702,7 +1941,7 @@ if (
         st.rerun()
 
     # -----------------------------------------------------
-    # Open exactly ONE dialog per run
+    # Open exactly one dialog per run
     # -----------------------------------------------------
 
     if st.session_state.show_existing_dialog:

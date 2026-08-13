@@ -17,6 +17,10 @@ SMTP_PORT = 465
 SENDER_NAME = "Ascension Registration"
 
 
+# ---------------------------------------------------------
+# Credentials
+# ---------------------------------------------------------
+
 def _get_email_credentials() -> tuple[str, str]:
     """
     Read the Gmail address and App Password
@@ -110,14 +114,15 @@ def send_verification_email(
     """
 
     subject = (
-        "Your Ascension Registration Verification Code"
+        "Ascension Registration Verification Code"
     )
 
     body = f"""
 Hello,
 
-A request was made to access the Ascension registration
-for Household ID:
+You requested access to your Ascension household registration.
+
+Household ID:
 
 {household_reference}
 
@@ -131,7 +136,100 @@ If you did not request access to this household,
 you can ignore this email.
 
 Ascension Catholic Church
-Registration
+Hurricane, West Virginia
+""".strip()
+
+    _send_email(
+        recipient=recipient,
+        subject=subject,
+        body=body,
+    )
+
+
+# ---------------------------------------------------------
+# Household ID recovery email
+# ---------------------------------------------------------
+
+def send_household_id_recovery(
+    recipient: str,
+    household_references: list[str],
+) -> None:
+    """
+    Send one or more Household IDs associated
+    with the supplied email address.
+
+    This function should only be called when the
+    database has found at least one matching household.
+    """
+
+    if not household_references:
+        raise ValueError(
+            "At least one Household ID is required "
+            "to send a recovery email."
+        )
+
+    subject = (
+        "Your Ascension Registration Household ID"
+    )
+
+    if len(household_references) == 1:
+
+        household_text = household_references[0]
+
+        body = f"""
+Hello,
+
+We received a request to recover your Ascension Registration
+Household ID.
+
+Your Household ID is:
+
+{household_text}
+
+You can use this ID on the Ascension Registration page to
+return to your household registration.
+
+For security, you will still be asked to verify your email
+before your household information is displayed.
+
+If you did not request your Household ID, you can ignore
+this email.
+
+Ascension Catholic Church
+Hurricane, West Virginia
+""".strip()
+
+    else:
+
+        household_lines = "\n".join(
+            f"- {reference}"
+            for reference in household_references
+        )
+
+        body = f"""
+Hello,
+
+We received a request to recover your Ascension Registration
+Household ID.
+
+Your email address is associated with more than one
+household registration.
+
+Your Household IDs are:
+
+{household_lines}
+
+You can use the appropriate ID on the Ascension Registration
+page to return to that household registration.
+
+For security, you will still be asked to verify your email
+before any household information is displayed.
+
+If you did not request your Household IDs, you can ignore
+this email.
+
+Ascension Catholic Church
+Hurricane, West Virginia
 """.strip()
 
     _send_email(
@@ -186,7 +284,7 @@ Thank you for registering with Ascension Catholic Church.
 
 Your registration has been received.
 
-Household ID:
+Your Household ID is:
 
 {household_reference}
 
@@ -197,8 +295,11 @@ Children included in this registration:
 Please keep your Household ID. You can use it to return
 to your household registration and make changes later.
 
+If you lose your Household ID, you can recover it using
+the email address associated with your registration.
+
 Ascension Catholic Church
-Registration
+Hurricane, West Virginia
 """.strip()
 
     _send_email(
@@ -226,17 +327,22 @@ def send_update_confirmation(
     )
 
     body = f"""
-Your Ascension Catholic Church registration has been updated.
+Hello,
+
+Your Ascension Catholic Church household registration
+has been updated successfully.
 
 Household ID:
 
 {household_reference}
 
-The changes to your household registration were saved
-successfully.
+Please keep this Household ID for future access.
+
+If you lose your Household ID, you can recover it using
+the email address associated with your registration.
 
 Ascension Catholic Church
-Registration
+Hurricane, West Virginia
 """.strip()
 
     _send_email(
@@ -267,6 +373,9 @@ This is a test email from the Ascension Registration App.
 
 If you received this message, the Gmail email service
 is configured correctly.
+
+Ascension Catholic Church
+Hurricane, West Virginia
 """.strip()
 
     _send_email(

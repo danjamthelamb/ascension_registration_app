@@ -116,7 +116,7 @@ def init_db() -> None:
         )
 
         # -------------------------------------------------
-        # Email verification codes
+        # Verification codes
         # -------------------------------------------------
 
         conn.execute(
@@ -228,6 +228,56 @@ def _generate_verification_code() -> str:
 
 
 # ---------------------------------------------------------
+# Household ID recovery
+# ---------------------------------------------------------
+
+def get_household_references_by_email(
+    email: str,
+) -> list[str]:
+    """
+    Find household references associated with an email.
+
+    Searches both Parent / Guardian A and
+    Parent / Guardian B.
+
+    Matching is case-insensitive.
+
+    Returns an empty list if no matching household exists.
+
+    Example:
+        [
+            "ASC-K7M4P9"
+        ]
+    """
+
+    email = email.strip().lower()
+
+    if not email:
+        return []
+
+    with _connect() as conn:
+
+        rows = conn.execute(
+            """
+            SELECT household_reference
+            FROM households
+            WHERE LOWER(TRIM(parent_a_email)) = ?
+               OR LOWER(TRIM(parent_b_email)) = ?
+            ORDER BY household_id;
+            """,
+            (
+                email,
+                email,
+            ),
+        ).fetchall()
+
+    return [
+        row[0]
+        for row in rows
+    ]
+
+
+# ---------------------------------------------------------
 # Create email verification code
 # ---------------------------------------------------------
 
@@ -304,8 +354,8 @@ def create_household_verification(
 
         # Invalidate any previous unused codes.
         #
-        # If the parent clicks "resend code", only the
-        # newest code should remain valid.
+        # If the parent clicks "resend code",
+        # only the newest code remains valid.
         conn.execute(
             """
             UPDATE verification_codes
@@ -344,9 +394,15 @@ def create_household_verification(
         )
 
     return {
-        "household_reference": stored_reference,
-        "email": email,
-        "code": code,
+        "household_reference":
+            stored_reference,
+
+        "email":
+            email,
+
+        "code":
+            code,
+
         "expires_minutes":
             VERIFICATION_CODE_TTL_MINUTES,
     }
@@ -478,9 +534,7 @@ def verify_household_code(
 
         if code_matches:
 
-            # Mark the code used immediately.
-            #
-            # The same code cannot be used twice.
+            # Mark code used immediately.
             conn.execute(
                 """
                 UPDATE verification_codes
@@ -499,11 +553,12 @@ def verify_household_code(
         # Incorrect code
         # ---------------------------------------------
 
-        new_attempt_count = attempt_count + 1
+        new_attempt_count = (
+            attempt_count + 1
+        )
 
         if new_attempt_count >= max_attempts:
 
-            # Lock/invalidate after the final attempt.
             conn.execute(
                 """
                 UPDATE verification_codes
@@ -597,33 +652,51 @@ def save_registration(
             (
                 household_reference,
 
-                household["parent_a_first_name"],
-                household["parent_a_last_name"],
-                household["parent_a_email"],
-                household["parent_a_phone"],
+                household[
+                    "parent_a_first_name"
+                ],
+
+                household[
+                    "parent_a_last_name"
+                ],
+
+                household[
+                    "parent_a_email"
+                ],
+
+                household[
+                    "parent_a_phone"
+                ],
 
                 household.get(
                     "parent_b_first_name",
                     "",
                 ),
+
                 household.get(
                     "parent_b_last_name",
                     "",
                 ),
+
                 household.get(
                     "parent_b_email",
                     "",
                 ),
+
                 household.get(
                     "parent_b_phone",
                     "",
                 ),
 
-                household["address_line_1"],
+                household[
+                    "address_line_1"
+                ],
+
                 household.get(
                     "address_line_2",
                     "",
                 ),
+
                 household["city"],
                 household["state"],
                 household["zip_code"],
@@ -638,9 +711,14 @@ def save_registration(
 
         for child in children:
 
-            date_of_birth = child["date_of_birth"]
+            date_of_birth = (
+                child["date_of_birth"]
+            )
 
-            if hasattr(date_of_birth, "isoformat"):
+            if hasattr(
+                date_of_birth,
+                "isoformat",
+            ):
                 date_of_birth = (
                     date_of_birth.isoformat()
                 )
@@ -661,15 +739,30 @@ def save_registration(
                 """,
                 (
                     household_id,
-                    child["first_name"],
+
+                    child[
+                        "first_name"
+                    ],
+
                     child.get(
                         "middle_name",
                         "",
                     ),
-                    child["last_name"],
+
+                    child[
+                        "last_name"
+                    ],
+
                     date_of_birth,
-                    child["grade"],
-                    child["school"],
+
+                    child[
+                        "grade"
+                    ],
+
+                    child[
+                        "school"
+                    ],
+
                     int(
                         child.get(
                             "receiving_confirmation",
@@ -679,7 +772,10 @@ def save_registration(
                 ),
             )
 
-    return household_id, household_reference
+    return (
+        household_id,
+        household_reference,
+    )
 
 
 # ---------------------------------------------------------
@@ -736,11 +832,15 @@ def get_registration_by_reference(
             ORDER BY child_id;
             """,
             (
-                household_row["household_id"],
+                household_row[
+                    "household_id"
+                ],
             ),
         ).fetchall()
 
-    household = dict(household_row)
+    household = dict(
+        household_row
+    )
 
     children = []
 
@@ -748,22 +848,30 @@ def get_registration_by_reference(
 
         child = dict(row)
 
-        # Convert SQLite text date back to
-        # a Python date object for Streamlit.
         child["date_of_birth"] = (
             date.fromisoformat(
-                child["date_of_birth"]
+                child[
+                    "date_of_birth"
+                ]
             )
         )
 
-        # SQLite stores booleans as 0/1.
-        child["receiving_confirmation"] = bool(
-            child["receiving_confirmation"]
+        child[
+            "receiving_confirmation"
+        ] = bool(
+            child[
+                "receiving_confirmation"
+            ]
         )
 
-        children.append(child)
+        children.append(
+            child
+        )
 
-    return household, children
+    return (
+        household,
+        children,
+    )
 
 
 # ---------------------------------------------------------
@@ -822,12 +930,15 @@ def update_registration(
                 household[
                     "parent_a_first_name"
                 ],
+
                 household[
                     "parent_a_last_name"
                 ],
+
                 household[
                     "parent_a_email"
                 ],
+
                 household[
                     "parent_a_phone"
                 ],
@@ -836,34 +947,49 @@ def update_registration(
                     "parent_b_first_name",
                     "",
                 ),
+
                 household.get(
                     "parent_b_last_name",
                     "",
                 ),
+
                 household.get(
                     "parent_b_email",
                     "",
                 ),
+
                 household.get(
                     "parent_b_phone",
                     "",
                 ),
 
-                household["address_line_1"],
+                household[
+                    "address_line_1"
+                ],
+
                 household.get(
                     "address_line_2",
                     "",
                 ),
-                household["city"],
-                household["state"],
-                household["zip_code"],
+
+                household[
+                    "city"
+                ],
+
+                household[
+                    "state"
+                ],
+
+                household[
+                    "zip_code"
+                ],
 
                 household_id,
             ),
         )
 
         # ---------------------------------------------
-        # Find children already in database
+        # Existing child IDs
         # ---------------------------------------------
 
         existing_child_ids = {
@@ -874,22 +1000,26 @@ def update_registration(
                 FROM children
                 WHERE household_id = ?;
                 """,
-                (household_id,),
+                (
+                    household_id,
+                ),
             ).fetchall()
         }
 
         # ---------------------------------------------
-        # Find existing children still present
+        # Children still present
         # ---------------------------------------------
 
         submitted_child_ids = {
             child["child_id"]
             for child in children
-            if child.get("child_id") is not None
+            if child.get(
+                "child_id"
+            ) is not None
         }
 
         # ---------------------------------------------
-        # Delete children removed by parent
+        # Delete removed children
         # ---------------------------------------------
 
         children_to_delete = (
@@ -897,7 +1027,9 @@ def update_registration(
             - submitted_child_ids
         )
 
-        for child_id in children_to_delete:
+        for child_id in (
+            children_to_delete
+        ):
 
             conn.execute(
                 """
@@ -912,21 +1044,33 @@ def update_registration(
             )
 
         # ---------------------------------------------
-        # Update existing children / insert new ones
+        # Update existing / insert new
         # ---------------------------------------------
 
         for child in children:
 
-            date_of_birth = child["date_of_birth"]
+            date_of_birth = (
+                child[
+                    "date_of_birth"
+                ]
+            )
 
-            if hasattr(date_of_birth, "isoformat"):
+            if hasattr(
+                date_of_birth,
+                "isoformat",
+            ):
                 date_of_birth = (
                     date_of_birth.isoformat()
                 )
 
-            child_id = child.get("child_id")
+            child_id = child.get(
+                "child_id"
+            )
 
+            # -----------------------------------------
             # Existing child
+            # -----------------------------------------
+
             if child_id is not None:
 
                 conn.execute(
@@ -945,15 +1089,29 @@ def update_registration(
                     AND household_id = ?;
                     """,
                     (
-                        child["first_name"],
+                        child[
+                            "first_name"
+                        ],
+
                         child.get(
                             "middle_name",
                             "",
                         ),
-                        child["last_name"],
+
+                        child[
+                            "last_name"
+                        ],
+
                         date_of_birth,
-                        child["grade"],
-                        child["school"],
+
+                        child[
+                            "grade"
+                        ],
+
+                        child[
+                            "school"
+                        ],
+
                         int(
                             child.get(
                                 "receiving_confirmation",
@@ -962,11 +1120,15 @@ def update_registration(
                         ),
 
                         child_id,
+
                         household_id,
                     ),
                 )
 
+            # -----------------------------------------
             # New child
+            # -----------------------------------------
+
             else:
 
                 conn.execute(
@@ -985,15 +1147,30 @@ def update_registration(
                     """,
                     (
                         household_id,
-                        child["first_name"],
+
+                        child[
+                            "first_name"
+                        ],
+
                         child.get(
                             "middle_name",
                             "",
                         ),
-                        child["last_name"],
+
+                        child[
+                            "last_name"
+                        ],
+
                         date_of_birth,
-                        child["grade"],
-                        child["school"],
+
+                        child[
+                            "grade"
+                        ],
+
+                        child[
+                            "school"
+                        ],
+
                         int(
                             child.get(
                                 "receiving_confirmation",

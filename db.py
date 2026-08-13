@@ -25,6 +25,10 @@ VERIFICATION_CODE_TTL_MINUTES = 10
 VERIFICATION_MAX_ATTEMPTS = 5
 
 
+# ---------------------------------------------------------
+# Database connection
+# ---------------------------------------------------------
+
 def _connect() -> sqlite3.Connection:
     """
     Open a connection to the registration database.
@@ -41,6 +45,53 @@ def _connect() -> sqlite3.Connection:
 
 
 # ---------------------------------------------------------
+# Database migration helpers
+# ---------------------------------------------------------
+
+def _column_exists(
+    conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+) -> bool:
+    """
+    Return True if a column already exists in a table.
+    """
+
+    columns = conn.execute(
+        f"PRAGMA table_info({table_name});"
+    ).fetchall()
+
+    return any(
+        column[1] == column_name
+        for column in columns
+    )
+
+
+def _add_column_if_missing(
+    conn: sqlite3.Connection,
+    table_name: str,
+    column_name: str,
+    column_definition: str,
+) -> None:
+    """
+    Add a column to an existing SQLite table
+    only if the column is not already present.
+    """
+
+    if not _column_exists(
+        conn,
+        table_name,
+        column_name,
+    ):
+        conn.execute(
+            f"""
+            ALTER TABLE {table_name}
+            ADD COLUMN {column_name} {column_definition};
+            """
+        )
+
+
+# ---------------------------------------------------------
 # Initialize database
 # ---------------------------------------------------------
 
@@ -48,6 +99,9 @@ def init_db() -> None:
     """
     Create the application's database tables if they
     do not already exist.
+
+    Also performs simple migrations for new columns
+    added during development.
     """
 
     with _connect() as conn:
@@ -99,13 +153,54 @@ def init_db() -> None:
                 date_of_birth TEXT NOT NULL,
                 grade TEXT NOT NULL,
                 school TEXT NOT NULL,
-                receiving_confirmation INTEGER NOT NULL DEFAULT 0,
+
+                receiving_first_communion_reconciliation
+                    INTEGER NOT NULL DEFAULT 0,
+
+                receiving_confirmation
+                    INTEGER NOT NULL DEFAULT 0,
+
+                baptism_status TEXT,
+                first_reconciliation_status TEXT,
+                first_communion_status TEXT,
 
                 FOREIGN KEY (household_id)
                     REFERENCES households (household_id)
                     ON DELETE CASCADE
             );
             """
+        )
+
+        # -------------------------------------------------
+        # Migrate existing children table
+        # -------------------------------------------------
+
+        _add_column_if_missing(
+            conn,
+            "children",
+            "receiving_first_communion_reconciliation",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
+
+        _add_column_if_missing(
+            conn,
+            "children",
+            "baptism_status",
+            "TEXT",
+        )
+
+        _add_column_if_missing(
+            conn,
+            "children",
+            "first_reconciliation_status",
+            "TEXT",
+        )
+
+        _add_column_if_missing(
+            conn,
+            "children",
+            "first_communion_status",
+            "TEXT",
         )
 
         conn.execute(
@@ -243,11 +338,6 @@ def get_household_references_by_email(
     Matching is case-insensitive.
 
     Returns an empty list if no matching household exists.
-
-    Example:
-        [
-            "ASC-K7M4P9"
-        ]
     """
 
     email = email.strip().lower()
@@ -287,16 +377,7 @@ def create_household_verification(
     """
     Create a new verification code for an existing household.
 
-    Returns information needed by the email layer:
-
-        {
-            "household_reference": "ASC-ABC123",
-            "email": "parent@example.com",
-            "code": "482913",
-            "expires_minutes": 10
-        }
-
-    Returns None if the Household ID does not exist.
+    Returns information needed by the email layer.
 
     The plaintext code is returned so the application
     can email it, but it is NOT stored in SQLite.
@@ -329,10 +410,8 @@ def create_household_verification(
         stored_reference = household[1]
         email = household[2]
 
-        # Generate the new one-time code.
         code = _generate_verification_code()
 
-        # Unique salt for this verification request.
         salt = secrets.token_hex(16)
 
         code_hash = _hash_verification_code(
@@ -353,9 +432,6 @@ def create_household_verification(
         expires_text = expires_at.isoformat()
 
         # Invalidate any previous unused codes.
-        #
-        # If the parent clicks "resend code",
-        # only the newest code remains valid.
         conn.execute(
             """
             UPDATE verification_codes
@@ -418,18 +494,6 @@ def verify_household_code(
 ) -> tuple[bool, str]:
     """
     Verify a one-time email code.
-
-    Returns:
-
-        (True, "verified")
-
-    or:
-
-        (False, "invalid")
-        (False, "expired")
-        (False, "locked")
-        (False, "no_active_code")
-        (False, "household_not_found")
     """
 
     household_reference = (
@@ -534,7 +598,6 @@ def verify_household_code(
 
         if code_matches:
 
-            # Mark code used immediately.
             conn.execute(
                 """
                 UPDATE verification_codes
@@ -733,9 +796,18 @@ def save_registration(
                     date_of_birth,
                     grade,
                     school,
-                    receiving_confirmation
+
+                    receiving_first_communion_reconciliation,
+                    receiving_confirmation,
+
+                    baptism_status,
+                    first_reconciliation_status,
+                    first_communion_status
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?
+                );
                 """,
                 (
                     household_id,
@@ -765,9 +837,28 @@ def save_registration(
 
                     int(
                         child.get(
+                            "receiving_first_communion_reconciliation",
+                            False,
+                        )
+                    ),
+
+                    int(
+                        child.get(
                             "receiving_confirmation",
                             False,
                         )
+                    ),
+
+                    child.get(
+                        "baptism_status"
+                    ),
+
+                    child.get(
+                        "first_reconciliation_status"
+                    ),
+
+                    child.get(
+                        "first_communion_status"
                     ),
                 ),
             )
@@ -789,9 +880,8 @@ def get_registration_by_reference(
     Load a household and all of its children using
     the public Household ID.
 
-    This function should only be called by the public
-    application AFTER the household has passed email
-    verification.
+    This should only be called by the public
+    application AFTER email verification.
     """
 
     household_reference = (
@@ -804,10 +894,6 @@ def get_registration_by_reference(
 
         conn.row_factory = sqlite3.Row
 
-        # ---------------------------------------------
-        # Get household
-        # ---------------------------------------------
-
         household_row = conn.execute(
             """
             SELECT *
@@ -819,10 +905,6 @@ def get_registration_by_reference(
 
         if household_row is None:
             return None
-
-        # ---------------------------------------------
-        # Get children
-        # ---------------------------------------------
 
         child_rows = conn.execute(
             """
@@ -853,6 +935,15 @@ def get_registration_by_reference(
                 child[
                     "date_of_birth"
                 ]
+            )
+        )
+
+        child[
+            "receiving_first_communion_reconciliation"
+        ] = bool(
+            child.get(
+                "receiving_first_communion_reconciliation",
+                0,
             )
         )
 
@@ -891,6 +982,8 @@ def update_registration(
         - edited children
         - newly added children
         - removed children
+        - sacramental preparation
+        - sacramental history
     """
 
     if not children:
@@ -1083,7 +1176,13 @@ def update_registration(
                         date_of_birth = ?,
                         grade = ?,
                         school = ?,
-                        receiving_confirmation = ?
+
+                        receiving_first_communion_reconciliation = ?,
+                        receiving_confirmation = ?,
+
+                        baptism_status = ?,
+                        first_reconciliation_status = ?,
+                        first_communion_status = ?
 
                     WHERE child_id = ?
                     AND household_id = ?;
@@ -1114,9 +1213,28 @@ def update_registration(
 
                         int(
                             child.get(
+                                "receiving_first_communion_reconciliation",
+                                False,
+                            )
+                        ),
+
+                        int(
+                            child.get(
                                 "receiving_confirmation",
                                 False,
                             )
+                        ),
+
+                        child.get(
+                            "baptism_status"
+                        ),
+
+                        child.get(
+                            "first_reconciliation_status"
+                        ),
+
+                        child.get(
+                            "first_communion_status"
                         ),
 
                         child_id,
@@ -1141,9 +1259,18 @@ def update_registration(
                         date_of_birth,
                         grade,
                         school,
-                        receiving_confirmation
+
+                        receiving_first_communion_reconciliation,
+                        receiving_confirmation,
+
+                        baptism_status,
+                        first_reconciliation_status,
+                        first_communion_status
                     )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?);
+                    VALUES (
+                        ?, ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?
+                    );
                     """,
                     (
                         household_id,
@@ -1173,9 +1300,28 @@ def update_registration(
 
                         int(
                             child.get(
+                                "receiving_first_communion_reconciliation",
+                                False,
+                            )
+                        ),
+
+                        int(
+                            child.get(
                                 "receiving_confirmation",
                                 False,
                             )
+                        ),
+
+                        child.get(
+                            "baptism_status"
+                        ),
+
+                        child.get(
+                            "first_reconciliation_status"
+                        ),
+
+                        child.get(
+                            "first_communion_status"
                         ),
                     ),
                 )

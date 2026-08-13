@@ -42,16 +42,6 @@ def calculate_age(date_of_birth: date) -> int:
 def is_valid_email(email: str) -> bool:
     """
     Practical email validation.
-
-    Accepts:
-        name@example.com
-        first.last@example.com
-        name+tag@example.com
-
-    Rejects:
-        name#example,com
-        name@example
-        name @example.com
     """
 
     email = email.strip()
@@ -69,19 +59,12 @@ def normalize_phone(phone: str) -> str | None:
     """
     Validate and normalize a US phone number.
 
-    Accepts:
-        3045551234
-        304-555-1234
-        (304) 555-1234
-        1-304-555-1234
-
     Returns:
         (304) 555-1234
     """
 
     digits = re.sub(r"\D", "", phone)
 
-    # Allow optional US country code.
     if len(digits) == 11 and digits.startswith("1"):
         digits = digits[1:]
 
@@ -110,10 +93,6 @@ def normalize_zip(zip_code: str) -> str | None:
         25033
         250331234
         25033-1234
-
-    Returns:
-        25033
-        25033-1234
     """
 
     zip_code = zip_code.strip()
@@ -139,10 +118,6 @@ def normalize_zip(zip_code: str) -> str | None:
 def mask_email(email: str) -> str:
     """
     Mask an email address for display.
-
-    Example:
-        daniel@example.com
-        d••••••@example.com
     """
 
     if "@" not in email:
@@ -162,23 +137,138 @@ def mask_email(email: str) -> str:
 
 
 def clear_verification_state() -> None:
-    """
-    Clear temporary returning-household
-    verification information.
-    """
-
     st.session_state.verification_reference = None
     st.session_state.verification_email = None
     st.session_state.show_existing_dialog = False
 
 
 def clear_recovery_state() -> None:
-    """
-    Clear temporary Household ID recovery state.
-    """
-
     st.session_state.show_recovery_dialog = False
     st.session_state.recovery_request_sent = False
+
+
+def sacrament_status_index(status: str | None) -> int:
+    """
+    Convert a stored sacramental status into
+    its selectbox index.
+    """
+
+    options = [
+        "Select one",
+        "Yes",
+        "No",
+        "Not sure",
+    ]
+
+    if status in options:
+        return options.index(status)
+
+    return 0
+
+
+def sacrament_preparation_labels(
+    child: dict,
+) -> list[str]:
+    """
+    Return the sacramental preparation programs
+    selected for a child.
+    """
+
+    labels = []
+
+    if child.get(
+        "receiving_first_communion_reconciliation",
+        False,
+    ):
+        labels.append(
+            "First Reconciliation / First Communion"
+        )
+
+    if child.get(
+        "receiving_confirmation",
+        False,
+    ):
+        labels.append(
+            "Confirmation"
+        )
+
+    return labels
+
+
+def sacramental_follow_up_reasons(
+    child: dict,
+) -> list[str]:
+    """
+    Identify sacramental-history answers that
+    require staff follow-up.
+
+    Registration is NOT blocked.
+    """
+
+    reasons = []
+
+    receiving_first_communion = child.get(
+        "receiving_first_communion_reconciliation",
+        False,
+    )
+
+    receiving_confirmation = child.get(
+        "receiving_confirmation",
+        False,
+    )
+
+    baptism_status = child.get(
+        "baptism_status"
+    )
+
+    first_reconciliation_status = child.get(
+        "first_reconciliation_status"
+    )
+
+    first_communion_status = child.get(
+        "first_communion_status"
+    )
+
+    # First Communion / Reconciliation preparation
+    # requires previous Baptism.
+    if receiving_first_communion:
+
+        if baptism_status != "Yes":
+            reasons.append(
+                f"Baptism: "
+                f"{baptism_status or 'Not provided'}"
+            )
+
+    # Confirmation preparation requires Baptism,
+    # First Reconciliation, and First Communion.
+    if receiving_confirmation:
+
+        baptism_reason = (
+            f"Baptism: "
+            f"{baptism_status or 'Not provided'}"
+        )
+
+        if (
+            baptism_status != "Yes"
+            and baptism_reason not in reasons
+        ):
+            reasons.append(
+                baptism_reason
+            )
+
+        if first_reconciliation_status != "Yes":
+            reasons.append(
+                "First Reconciliation: "
+                f"{first_reconciliation_status or 'Not provided'}"
+            )
+
+        if first_communion_status != "Yes":
+            reasons.append(
+                "First Communion: "
+                f"{first_communion_status or 'Not provided'}"
+            )
+
+    return reasons
 
 
 # ---------------------------------------------------------
@@ -266,10 +356,6 @@ if "confirmation_email_error" not in st.session_state:
 @st.dialog("Recover Household ID")
 def recover_household_id_dialog():
 
-    # -----------------------------------------------------
-    # Recovery request already submitted
-    # -----------------------------------------------------
-
     if st.session_state.recovery_request_sent:
 
         st.success(
@@ -311,10 +397,6 @@ def recover_household_id_dialog():
 
         return
 
-    # -----------------------------------------------------
-    # Email entry
-    # -----------------------------------------------------
-
     st.write(
         "Enter the email address associated with your "
         "household registration."
@@ -339,19 +421,15 @@ def recover_household_id_dialog():
         email = email.strip()
 
         if not email:
-
             st.error(
                 "Please enter your email address."
             )
-
             return
 
         if not is_valid_email(email):
-
             st.error(
                 "Please enter a valid email address."
             )
-
             return
 
         try:
@@ -362,11 +440,6 @@ def recover_household_id_dialog():
                 )
             )
 
-            # Only send an email when the address
-            # actually exists in the database.
-            #
-            # The user-facing response stays the same
-            # whether or not a match exists.
             if references:
 
                 send_household_id_recovery(
@@ -576,11 +649,6 @@ def existing_household_dialog():
 
             return
 
-        # ---------------------------------------------
-        # Verification passed.
-        # Load the household.
-        # ---------------------------------------------
-
         result = get_registration_by_reference(
             household_reference
         )
@@ -598,83 +666,53 @@ def existing_household_dialog():
         st.session_state.household = {
 
             "parent_a_first_name":
-                household[
-                    "parent_a_first_name"
-                ],
+                household["parent_a_first_name"],
 
             "parent_a_last_name":
-                household[
-                    "parent_a_last_name"
-                ],
+                household["parent_a_last_name"],
 
             "parent_a_email":
-                household[
-                    "parent_a_email"
-                ],
+                household["parent_a_email"],
 
             "parent_a_phone":
-                household[
-                    "parent_a_phone"
-                ],
+                household["parent_a_phone"],
 
             "parent_b_first_name":
-                household[
-                    "parent_b_first_name"
-                ] or "",
+                household["parent_b_first_name"] or "",
 
             "parent_b_last_name":
-                household[
-                    "parent_b_last_name"
-                ] or "",
+                household["parent_b_last_name"] or "",
 
             "parent_b_email":
-                household[
-                    "parent_b_email"
-                ] or "",
+                household["parent_b_email"] or "",
 
             "parent_b_phone":
-                household[
-                    "parent_b_phone"
-                ] or "",
+                household["parent_b_phone"] or "",
 
             "address_line_1":
-                household[
-                    "address_line_1"
-                ],
+                household["address_line_1"],
 
             "address_line_2":
-                household[
-                    "address_line_2"
-                ] or "",
+                household["address_line_2"] or "",
 
             "city":
-                household[
-                    "city"
-                ],
+                household["city"],
 
             "state":
-                household[
-                    "state"
-                ],
+                household["state"],
 
             "zip_code":
-                household[
-                    "zip_code"
-                ],
+                household["zip_code"],
         }
 
         st.session_state.children = children
 
         st.session_state.existing_household_id = (
-            household[
-                "household_id"
-            ]
+            household["household_id"]
         )
 
         st.session_state.existing_household_reference = (
-            household[
-                "household_reference"
-            ]
+            household["household_reference"]
         )
 
         st.session_state.registration_mode = (
@@ -687,10 +725,6 @@ def existing_household_dialog():
         st.rerun()
 
     st.divider()
-
-    # -----------------------------------------------------
-    # Resend code
-    # -----------------------------------------------------
 
     if st.button(
         "Send a New Code",
@@ -729,9 +763,7 @@ def existing_household_dialog():
             )
 
             st.session_state.verification_email = (
-                verification[
-                    "email"
-                ]
+                verification["email"]
             )
 
             st.success(
@@ -963,10 +995,6 @@ def household_dialog():
 
         if submitted:
 
-            # ---------------------------------------------
-            # Required field validation
-            # ---------------------------------------------
-
             required_fields = {
 
                 "Parent / Guardian A first name":
@@ -1010,10 +1038,6 @@ def household_dialog():
 
                 return
 
-            # ---------------------------------------------
-            # Parent A email
-            # ---------------------------------------------
-
             if not is_valid_email(
                 parent_a_email
             ):
@@ -1024,10 +1048,6 @@ def household_dialog():
                 )
 
                 return
-
-            # ---------------------------------------------
-            # Parent B email
-            # ---------------------------------------------
 
             if (
                 parent_b_email.strip()
@@ -1042,10 +1062,6 @@ def household_dialog():
                 )
 
                 return
-
-            # ---------------------------------------------
-            # Parent A phone
-            # ---------------------------------------------
 
             parent_a_phone_formatted = (
                 normalize_phone(
@@ -1064,10 +1080,6 @@ def household_dialog():
                 )
 
                 return
-
-            # ---------------------------------------------
-            # Parent B phone
-            # ---------------------------------------------
 
             parent_b_phone_formatted = None
 
@@ -1091,10 +1103,6 @@ def household_dialog():
 
                     return
 
-            # ---------------------------------------------
-            # ZIP code
-            # ---------------------------------------------
-
             zip_code_formatted = (
                 normalize_zip(
                     zip_code
@@ -1109,10 +1117,6 @@ def household_dialog():
                 )
 
                 return
-
-            # ---------------------------------------------
-            # State
-            # ---------------------------------------------
 
             state_formatted = (
                 state.strip().upper()
@@ -1129,10 +1133,6 @@ def household_dialog():
                 )
 
                 return
-
-            # ---------------------------------------------
-            # Save to session
-            # ---------------------------------------------
 
             st.session_state.household = {
 
@@ -1193,15 +1193,12 @@ def child_dialog(
     )
 
     if editing:
-
         child = (
             st.session_state.children[
                 child_index
             ]
         )
-
     else:
-
         child = {}
 
     household = (
@@ -1238,194 +1235,457 @@ def child_dialog(
     )
 
     try:
-
         grade_index = (
             grades.index(
                 existing_grade
             )
         )
-
     except ValueError:
-
         grade_index = 0
 
-    with st.form(
-        f"child_form_"
-        f"{child_index if editing else 'new'}",
-        enter_to_submit=False,
-    ):
+    sacrament_status_options = [
+        "Select one",
+        "Yes",
+        "No",
+        "Not sure",
+    ]
 
-        col1, col2 = st.columns(2)
+    # -----------------------------------------------------
+    # Basic information
+    # -----------------------------------------------------
 
-        with col1:
+    st.subheader(
+        "Basic Information"
+    )
 
-            first_name = st.text_input(
-                "First name",
-                value=child.get(
-                    "first_name",
-                    "",
-                ),
-            )
+    col1, col2 = st.columns(2)
 
-        with col2:
+    with col1:
 
-            middle_name = st.text_input(
-                "Middle name",
-                value=child.get(
-                    "middle_name",
-                    "",
-                ),
-            )
-
-        last_name = st.text_input(
-            "Last name",
+        first_name = st.text_input(
+            "First name",
             value=child.get(
-                "last_name",
-                default_last_name,
-            ),
-        )
-
-        date_of_birth = st.date_input(
-            "Date of birth",
-            value=child.get(
-                "date_of_birth",
-                None,
-            ),
-            max_value=date.today(),
-        )
-
-        grade = st.selectbox(
-            "Grade",
-            grades,
-            index=grade_index,
-        )
-
-        school = st.text_input(
-            "School",
-            value=child.get(
-                "school",
+                "first_name",
                 "",
             ),
         )
 
-        receiving_confirmation = (
-            st.toggle(
-                "Receiving Confirmation this year",
-                value=child.get(
-                    "receiving_confirmation",
-                    False,
+    with col2:
+
+        middle_name = st.text_input(
+            "Middle name",
+            value=child.get(
+                "middle_name",
+                "",
+            ),
+        )
+
+    last_name = st.text_input(
+        "Last name",
+        value=child.get(
+            "last_name",
+            default_last_name,
+        ),
+    )
+
+    date_of_birth = st.date_input(
+        "Date of birth",
+        value=child.get(
+            "date_of_birth",
+            None,
+        ),
+        max_value=date.today(),
+    )
+
+    grade = st.selectbox(
+        "Grade",
+        grades,
+        index=grade_index,
+    )
+
+    school = st.text_input(
+        "School",
+        value=child.get(
+            "school",
+            "",
+        ),
+    )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Sacrament preparation
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Sacrament Preparation"
+    )
+
+    st.caption(
+        "Select any sacraments this child is preparing "
+        "to receive this year."
+    )
+
+    receiving_first_communion_reconciliation = (
+        st.toggle(
+            "Receiving First Reconciliation / "
+            "First Communion this year",
+            value=child.get(
+                "receiving_first_communion_reconciliation",
+                False,
+            ),
+        )
+    )
+
+    receiving_confirmation = (
+        st.toggle(
+            "Receiving Confirmation this year",
+            value=child.get(
+                "receiving_confirmation",
+                False,
+            ),
+        )
+    )
+
+    # -----------------------------------------------------
+    # Sacramental history
+    # -----------------------------------------------------
+
+    baptism_status = None
+    first_reconciliation_status = None
+    first_communion_status = None
+
+    sacramental_history_needed = (
+        receiving_first_communion_reconciliation
+        or receiving_confirmation
+    )
+
+    if sacramental_history_needed:
+
+        st.divider()
+
+        st.subheader(
+            "Sacramental History"
+        )
+
+        st.caption(
+            "Please tell us which sacraments this child "
+            "has already received."
+        )
+
+        baptism_status = st.selectbox(
+            "Has this child been baptized?",
+            sacrament_status_options,
+            index=sacrament_status_index(
+                child.get(
+                    "baptism_status"
+                )
+            ),
+        )
+
+        # Confirmation requires all three previous
+        # sacramental-history questions.
+        if receiving_confirmation:
+
+            first_reconciliation_status = (
+                st.selectbox(
+                    "Has this child received "
+                    "First Reconciliation?",
+                    sacrament_status_options,
+                    index=sacrament_status_index(
+                        child.get(
+                            "first_reconciliation_status"
+                        )
+                    ),
+                )
+            )
+
+            first_communion_status = (
+                st.selectbox(
+                    "Has this child received "
+                    "First Communion?",
+                    sacrament_status_options,
+                    index=sacrament_status_index(
+                        child.get(
+                            "first_communion_status"
+                        )
+                    ),
+                )
+            )
+
+        # ---------------------------------------------
+        # Live follow-up warning
+        # ---------------------------------------------
+
+        preview_child = {
+            "receiving_first_communion_reconciliation":
+                receiving_first_communion_reconciliation,
+
+            "receiving_confirmation":
+                receiving_confirmation,
+
+            "baptism_status":
+                (
+                    None
+                    if baptism_status == "Select one"
+                    else baptism_status
                 ),
+
+            "first_reconciliation_status":
+                (
+                    None
+                    if first_reconciliation_status
+                    in (None, "Select one")
+                    else first_reconciliation_status
+                ),
+
+            "first_communion_status":
+                (
+                    None
+                    if first_communion_status
+                    in (None, "Select one")
+                    else first_communion_status
+                ),
+        }
+
+        follow_up_reasons = (
+            sacramental_follow_up_reasons(
+                preview_child
             )
         )
 
-        button_text = (
-            "Save Changes"
-            if editing
-            else "Add Child"
+        # Only show the follow-up warning after
+        # applicable questions have actually been answered.
+        history_questions_complete = (
+            baptism_status != "Select one"
         )
 
-        submitted = st.form_submit_button(
-            button_text,
-            type="primary",
-            use_container_width=True,
-        )
+        if receiving_confirmation:
 
-        if submitted:
+            history_questions_complete = (
+                history_questions_complete
+                and first_reconciliation_status
+                != "Select one"
+                and first_communion_status
+                != "Select one"
+            )
 
-            if not first_name.strip():
+        if (
+            history_questions_complete
+            and follow_up_reasons
+        ):
+
+            st.warning(
+                "Sacramental follow-up will be needed. "
+                "Please continue with registration. "
+                "A member of the faith formation team "
+                "will follow up with you."
+            )
+
+    st.divider()
+
+    button_text = (
+        "Save Changes"
+        if editing
+        else "Add Child"
+    )
+
+    if st.button(
+        button_text,
+        type="primary",
+        use_container_width=True,
+    ):
+
+        # -------------------------------------------------
+        # Basic validation
+        # -------------------------------------------------
+
+        if not first_name.strip():
+
+            st.error(
+                "Please enter the child's first name."
+            )
+
+            return
+
+        if not last_name.strip():
+
+            st.error(
+                "Please enter the child's last name."
+            )
+
+            return
+
+        if not school.strip():
+
+            st.error(
+                "Please enter the child's school."
+            )
+
+            return
+
+        if date_of_birth is None:
+
+            st.error(
+                "Please enter a date of birth."
+            )
+
+            return
+
+        if grade == "Select grade":
+
+            st.error(
+                "Please select a grade."
+            )
+
+            return
+
+        # -------------------------------------------------
+        # Sacramental history validation
+        # -------------------------------------------------
+
+        if sacramental_history_needed:
+
+            if baptism_status == "Select one":
 
                 st.error(
-                    "Please enter the child's "
-                    "first name."
+                    "Please indicate whether this child "
+                    "has been baptized."
                 )
 
                 return
 
-            if not last_name.strip():
+        if receiving_confirmation:
 
-                st.error(
-                    "Please enter the child's "
-                    "last name."
-                )
-
-                return
-
-            if not school.strip():
-
-                st.error(
-                    "Please enter the child's school."
-                )
-
-                return
-
-            if date_of_birth is None:
-
-                st.error(
-                    "Please enter a date of birth."
-                )
-
-                return
-
-            if grade == "Select grade":
-
-                st.error(
-                    "Please select a grade."
-                )
-
-                return
-
-            child_data = {
-
-                "first_name":
-                    first_name.strip(),
-
-                "middle_name":
-                    middle_name.strip(),
-
-                "last_name":
-                    last_name.strip(),
-
-                "date_of_birth":
-                    date_of_birth,
-
-                "grade":
-                    grade,
-
-                "school":
-                    school.strip(),
-
-                "receiving_confirmation":
-                    receiving_confirmation,
-            }
-
-            # Preserve database child_id
-            # when editing an existing child.
             if (
-                editing
-                and child.get(
-                    "child_id"
-                ) is not None
+                first_reconciliation_status
+                == "Select one"
             ):
 
-                child_data[
-                    "child_id"
-                ] = child[
-                    "child_id"
-                ]
-
-            if editing:
-
-                st.session_state.children[
-                    child_index
-                ] = child_data
-
-            else:
-
-                st.session_state.children.append(
-                    child_data
+                st.error(
+                    "Please indicate whether this child "
+                    "has received First Reconciliation."
                 )
 
-            st.rerun()
+                return
+
+            if (
+                first_communion_status
+                == "Select one"
+            ):
+
+                st.error(
+                    "Please indicate whether this child "
+                    "has received First Communion."
+                )
+
+                return
+
+        # -------------------------------------------------
+        # Preserve previously known sacramental history
+        # when a question isn't currently applicable.
+        # -------------------------------------------------
+
+        if sacramental_history_needed:
+
+            saved_baptism_status = (
+                baptism_status
+            )
+
+        else:
+
+            saved_baptism_status = child.get(
+                "baptism_status"
+            )
+
+        if receiving_confirmation:
+
+            saved_first_reconciliation_status = (
+                first_reconciliation_status
+            )
+
+            saved_first_communion_status = (
+                first_communion_status
+            )
+
+        else:
+
+            saved_first_reconciliation_status = (
+                child.get(
+                    "first_reconciliation_status"
+                )
+            )
+
+            saved_first_communion_status = (
+                child.get(
+                    "first_communion_status"
+                )
+            )
+
+        child_data = {
+
+            "first_name":
+                first_name.strip(),
+
+            "middle_name":
+                middle_name.strip(),
+
+            "last_name":
+                last_name.strip(),
+
+            "date_of_birth":
+                date_of_birth,
+
+            "grade":
+                grade,
+
+            "school":
+                school.strip(),
+
+            "receiving_first_communion_reconciliation":
+                receiving_first_communion_reconciliation,
+
+            "receiving_confirmation":
+                receiving_confirmation,
+
+            "baptism_status":
+                saved_baptism_status,
+
+            "first_reconciliation_status":
+                saved_first_reconciliation_status,
+
+            "first_communion_status":
+                saved_first_communion_status,
+        }
+
+        # Preserve database child_id when editing
+        # an existing child.
+        if (
+            editing
+            and child.get(
+                "child_id"
+            ) is not None
+        ):
+
+            child_data[
+                "child_id"
+            ] = child[
+                "child_id"
+            ]
+
+        if editing:
+
+            st.session_state.children[
+                child_index
+            ] = child_data
+
+        else:
+
+            st.session_state.children.append(
+                child_data
+            )
+
+        st.rerun()
 
 
 # ---------------------------------------------------------
@@ -1580,21 +1840,78 @@ def review_dialog():
             f"(Age {age})"
         )
 
+        preparation = (
+            sacrament_preparation_labels(
+                child
+            )
+        )
+
+        if preparation:
+
+            st.write(
+                "**Sacrament preparation:** "
+                + ", ".join(
+                    preparation
+                )
+            )
+
+        # ---------------------------------------------
+        # Sacramental history
+        # ---------------------------------------------
+
+        history_parts = []
+
         if child.get(
-            "receiving_confirmation",
-            False,
+            "baptism_status"
         ):
 
-            st.write(
-                "✓ **Receiving Confirmation "
-                "this year**"
+            history_parts.append(
+                "Baptized: "
+                f"{child['baptism_status']}"
             )
 
-        else:
+        if child.get(
+            "first_reconciliation_status"
+        ):
 
-            st.write(
-                "**Confirmation:** No"
+            history_parts.append(
+                "First Reconciliation: "
+                f"{child['first_reconciliation_status']}"
             )
+
+        if child.get(
+            "first_communion_status"
+        ):
+
+            history_parts.append(
+                "First Communion: "
+                f"{child['first_communion_status']}"
+            )
+
+        if history_parts:
+
+            st.caption(
+                " • ".join(
+                    history_parts
+                )
+            )
+
+        follow_up_reasons = (
+            sacramental_follow_up_reasons(
+                child
+            )
+        )
+
+        if follow_up_reasons:
+
+            st.warning(
+                "Sacramental follow-up needed: "
+                + "; ".join(
+                    follow_up_reasons
+                )
+            )
+
+        st.write("")
 
     st.divider()
 
@@ -1799,10 +2116,6 @@ if (
         "and make changes."
     )
 
-    # -----------------------------------------------------
-    # Confirmation email result
-    # -----------------------------------------------------
-
     if (
         st.session_state.confirmation_email_sent
         is True
@@ -1939,10 +2252,6 @@ if (
         st.session_state.show_recovery_dialog = True
 
         st.rerun()
-
-    # -----------------------------------------------------
-    # Open exactly one dialog per run
-    # -----------------------------------------------------
 
     if st.session_state.show_existing_dialog:
 
@@ -2158,14 +2467,31 @@ else:
                     f"(Age {age})"
                 )
 
-                if child.get(
-                    "receiving_confirmation",
-                    False,
-                ):
+                preparation = (
+                    sacrament_preparation_labels(
+                        child
+                    )
+                )
+
+                if preparation:
 
                     st.caption(
-                        "✓ Receiving Confirmation "
-                        "this year"
+                        "Sacrament preparation: "
+                        + ", ".join(
+                            preparation
+                        )
+                    )
+
+                follow_up_reasons = (
+                    sacramental_follow_up_reasons(
+                        child
+                    )
+                )
+
+                if follow_up_reasons:
+
+                    st.warning(
+                        "Sacramental follow-up needed"
                     )
 
             with edit_col:

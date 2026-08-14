@@ -27,20 +27,17 @@ def inject_theme() -> None:
             --ascension-text-quiet: #626A72;
             --ascension-label: #586A82;
 
-            /* General borders */
+            /* Borders */
             --ascension-border: #D8D0C5;
             --ascension-border-hover: #C7BEB2;
 
-            /* Card borders */
-            --ascension-card-border: #C5B9AA;
-            --ascension-card-edge: #D9D0C4;
-
-            /* Inputs */
-            --ascension-input-bg: #2F3038;
-            --ascension-input-border: #555761;
-            --ascension-input-border-focus: #8B8D96;
-            --ascension-input-text: #F4F1EC;
-            --ascension-input-placeholder: #AEB0B7;
+            /* Light inputs */
+            --ascension-input-bg: #FFFDFC;
+            --ascension-input-bg-focus: #FFFFFF;
+            --ascension-input-border: #CFC6BA;
+            --ascension-input-border-focus: #7B8DA5;
+            --ascension-input-text: #2F3D4D;
+            --ascension-input-placeholder: #8A8580;
         }
 
 
@@ -103,63 +100,13 @@ def inject_theme() -> None:
 
 
         /* ==================================================
-           BORDERED CONTAINERS / CARDS
+           CARDS / BORDERED CONTAINERS
         ================================================== */
 
-        /*
-           Household and child cards.
-
-           We deliberately force the edge instead of relying
-           only on Streamlit's default border styling.
-        */
-
-        div[data-testid="stVerticalBlockBorderWrapper"] {
-            background-color: var(--ascension-surface) !important;
-
-            border:
-                1px solid var(--ascension-card-border) !important;
-
-            border-radius: 12px !important;
-
-            box-shadow:
-                inset 0 0 0 1px rgba(255, 255, 255, 0.65),
-                0 1px 2px rgba(32, 58, 92, 0.05),
-                0 3px 8px rgba(32, 58, 92, 0.035) !important;
-
-            box-sizing: border-box !important;
-        }
-
-
-        /*
-           Streamlit sometimes places the visible surface
-           on the first child of the wrapper.
-        */
-
-        div[data-testid="stVerticalBlockBorderWrapper"] > div {
-            background-color: var(--ascension-surface) !important;
-            border-radius: 11px !important;
-        }
-
-
-        /*
-           Extra inset edge.
-
-           This makes the card boundary remain visible even
-           if Streamlit's own border styling changes.
-        */
-
-        div[data-testid="stVerticalBlockBorderWrapper"]::after {
-            content: "";
-            position: absolute;
-            inset: 0;
+        [data-testid="stVerticalBlockBorderWrapper"] {
+            background-color: var(--ascension-surface);
+            border-color: var(--ascension-border) !important;
             border-radius: 12px;
-            box-shadow:
-                inset 0 0 0 1px var(--ascension-card-edge);
-            pointer-events: none;
-        }
-
-        div[data-testid="stVerticalBlockBorderWrapper"] {
-            position: relative;
         }
 
 
@@ -174,76 +121,63 @@ def inject_theme() -> None:
 
 
         /* ==================================================
-           INPUT LABELS
+           WIDGET LABELS
         ================================================== */
 
         [data-testid="stWidgetLabel"],
+        [data-testid="stWidgetLabel"] *,
         [data-testid="stWidgetLabel"] p,
-        [data-testid="stWidgetLabel"] span,
-        label,
-        label p,
-        label span {
+        [data-testid="stWidgetLabel"] span {
             color: var(--ascension-text) !important;
+            -webkit-text-fill-color: var(--ascension-text) !important;
             opacity: 1 !important;
         }
 
 
         /* ==================================================
-           INPUTS
+           TEXT INPUTS
         ================================================== */
 
-        [data-baseweb="input"] > div,
-        [data-baseweb="textarea"] > div,
-        [data-baseweb="select"] > div {
-            background-color:
-                var(--ascension-input-bg) !important;
+        /*
+           Light field background + dark text.
 
-            border:
-                1px solid var(--ascension-input-border) !important;
+           These selectors intentionally override the old
+           dark-theme input colors.
+        */
 
-            color:
-                var(--ascension-input-text) !important;
+        [data-testid="stTextInput"] [data-baseweb="input"] > div,
+        [data-testid="stNumberInput"] [data-baseweb="input"] > div,
+        [data-baseweb="input"] > div {
+            background-color: var(--ascension-input-bg) !important;
+            border-color: var(--ascension-input-border) !important;
+            color: var(--ascension-input-text) !important;
         }
 
 
-        /* Standard text inputs */
+        /* Actual entered text */
 
+        [data-testid="stTextInput"] input,
+        [data-testid="stNumberInput"] input,
         [data-baseweb="input"] input,
         input {
-            color:
-                var(--ascension-input-text) !important;
+            color: var(--ascension-input-text) !important;
 
             -webkit-text-fill-color:
                 var(--ascension-input-text) !important;
 
-            caret-color:
-                var(--ascension-input-text) !important;
-        }
+            caret-color: var(--ascension-navy) !important;
 
-
-        /* Text areas */
-
-        [data-baseweb="textarea"] textarea,
-        textarea {
-            color:
-                var(--ascension-input-text) !important;
-
-            -webkit-text-fill-color:
-                var(--ascension-input-text) !important;
-
-            caret-color:
-                var(--ascension-input-text) !important;
+            opacity: 1 !important;
         }
 
 
         /* Placeholder text */
 
+        [data-testid="stTextInput"] input::placeholder,
+        [data-testid="stNumberInput"] input::placeholder,
         [data-baseweb="input"] input::placeholder,
-        [data-baseweb="textarea"] textarea::placeholder,
-        input::placeholder,
-        textarea::placeholder {
-            color:
-                var(--ascension-input-placeholder) !important;
+        input::placeholder {
+            color: var(--ascension-input-placeholder) !important;
 
             -webkit-text-fill-color:
                 var(--ascension-input-placeholder) !important;
@@ -252,40 +186,125 @@ def inject_theme() -> None:
         }
 
 
-        /* Select boxes */
+        /* ==================================================
+           TEXT AREAS
+        ================================================== */
 
-        [data-baseweb="select"] span,
-        [data-baseweb="select"] div {
-            color:
+        [data-testid="stTextArea"] [data-baseweb="textarea"] > div,
+        [data-baseweb="textarea"] > div {
+            background-color: var(--ascension-input-bg) !important;
+            border-color: var(--ascension-input-border) !important;
+            color: var(--ascension-input-text) !important;
+        }
+
+        [data-testid="stTextArea"] textarea,
+        [data-baseweb="textarea"] textarea,
+        textarea {
+            color: var(--ascension-input-text) !important;
+
+            -webkit-text-fill-color:
+                var(--ascension-input-text) !important;
+
+            caret-color: var(--ascension-navy) !important;
+
+            opacity: 1 !important;
+        }
+
+        [data-testid="stTextArea"] textarea::placeholder,
+        [data-baseweb="textarea"] textarea::placeholder,
+        textarea::placeholder {
+            color: var(--ascension-input-placeholder) !important;
+
+            -webkit-text-fill-color:
+                var(--ascension-input-placeholder) !important;
+
+            opacity: 1 !important;
+        }
+
+
+        /* ==================================================
+           SELECT BOXES
+        ================================================== */
+
+        [data-testid="stSelectbox"] [data-baseweb="select"] > div,
+        [data-baseweb="select"] > div {
+            background-color: var(--ascension-input-bg) !important;
+            border-color: var(--ascension-input-border) !important;
+            color: var(--ascension-input-text) !important;
+        }
+
+        [data-testid="stSelectbox"] [data-baseweb="select"] span,
+        [data-baseweb="select"] span {
+            color: var(--ascension-input-text) !important;
+
+            -webkit-text-fill-color:
                 var(--ascension-input-text) !important;
         }
 
+        [data-testid="stSelectbox"] svg,
         [data-baseweb="select"] svg {
-            fill:
-                var(--ascension-input-text) !important;
-
-            color:
-                var(--ascension-input-text) !important;
+            color: var(--ascension-text-soft) !important;
+            fill: var(--ascension-text-soft) !important;
         }
 
 
-        /* Input icons */
+        /* ==================================================
+           DATE INPUTS
+        ================================================== */
+
+        [data-testid="stDateInput"] [data-baseweb="input"] > div {
+            background-color: var(--ascension-input-bg) !important;
+            border-color: var(--ascension-input-border) !important;
+            color: var(--ascension-input-text) !important;
+        }
+
+        [data-testid="stDateInput"] input {
+            color: var(--ascension-input-text) !important;
+
+            -webkit-text-fill-color:
+                var(--ascension-input-text) !important;
+
+            caret-color: var(--ascension-navy) !important;
+
+            opacity: 1 !important;
+        }
+
+        [data-testid="stDateInput"] input::placeholder {
+            color: var(--ascension-input-placeholder) !important;
+
+            -webkit-text-fill-color:
+                var(--ascension-input-placeholder) !important;
+
+            opacity: 1 !important;
+        }
+
+        [data-testid="stDateInput"] svg {
+            color: var(--ascension-text-soft) !important;
+            fill: var(--ascension-text-soft) !important;
+        }
+
+
+        /* ==================================================
+           INPUT ICONS
+        ================================================== */
 
         [data-baseweb="input"] svg,
         [data-baseweb="textarea"] svg {
-            fill:
-                var(--ascension-input-placeholder) !important;
-
-            color:
-                var(--ascension-input-placeholder) !important;
+            color: var(--ascension-text-soft) !important;
+            fill: var(--ascension-text-soft) !important;
         }
 
 
-        /* Focus state */
+        /* ==================================================
+           INPUT FOCUS STATE
+        ================================================== */
 
         [data-baseweb="input"]:focus-within > div,
         [data-baseweb="textarea"]:focus-within > div,
         [data-baseweb="select"]:focus-within > div {
+            background-color:
+                var(--ascension-input-bg-focus) !important;
+
             border-color:
                 var(--ascension-input-border-focus) !important;
 
@@ -295,43 +314,19 @@ def inject_theme() -> None:
         }
 
 
-        /* Disabled */
+        /* ==================================================
+           DISABLED INPUTS
+        ================================================== */
 
         input:disabled,
         textarea:disabled {
-            color: #C6C4C0 !important;
-            -webkit-text-fill-color: #C6C4C0 !important;
-            opacity: 0.75 !important;
-        }
-
-
-        /* ==================================================
-           DATE INPUTS
-        ================================================== */
-
-        [data-testid="stDateInput"]
-        [data-baseweb="input"] > div {
-            background-color:
-                var(--ascension-input-bg) !important;
-
-            border-color:
-                var(--ascension-input-border) !important;
-        }
-
-        [data-testid="stDateInput"] input {
-            color:
-                var(--ascension-input-text) !important;
+            color: #77736E !important;
 
             -webkit-text-fill-color:
-                var(--ascension-input-text) !important;
-        }
+                #77736E !important;
 
-        [data-testid="stDateInput"] svg {
-            color:
-                var(--ascension-input-placeholder) !important;
-
-            fill:
-                var(--ascension-input-placeholder) !important;
+            background-color: #F0EDE8 !important;
+            opacity: 0.75 !important;
         }
 
 
@@ -340,12 +335,8 @@ def inject_theme() -> None:
         ================================================== */
 
         button[kind="primary"] {
-            background-color:
-                var(--ascension-red) !important;
-
-            border-color:
-                var(--ascension-red) !important;
-
+            background-color: var(--ascension-red) !important;
+            border-color: var(--ascension-red) !important;
             color: #FFFFFF !important;
             font-weight: 700;
         }
@@ -361,12 +352,8 @@ def inject_theme() -> None:
         }
 
         button[kind="primary"]:hover {
-            background-color:
-                var(--ascension-red-hover) !important;
-
-            border-color:
-                var(--ascension-red-hover) !important;
-
+            background-color: var(--ascension-red-hover) !important;
+            border-color: var(--ascension-red-hover) !important;
             color: #FFFFFF !important;
         }
 
@@ -376,12 +363,8 @@ def inject_theme() -> None:
         ================================================== */
 
         button[kind="secondary"] {
-            background-color:
-                var(--ascension-surface) !important;
-
-            border:
-                1px solid var(--ascension-border) !important;
-
+            background-color: var(--ascension-surface) !important;
+            border-color: var(--ascension-border) !important;
             color: #19375D !important;
         }
 
@@ -422,15 +405,28 @@ def inject_theme() -> None:
 
 
         /* ==================================================
+           DOWNLOAD BUTTONS
+        ================================================== */
+
+        [data-testid="stDownloadButton"] button,
+        [data-testid="stDownloadButton"] button *,
+        [data-testid="stDownloadButton"] button p,
+        [data-testid="stDownloadButton"] button span {
+            color: #19375D !important;
+
+            -webkit-text-fill-color:
+                #19375D !important;
+        }
+
+
+        /* ==================================================
            DATAFRAMES / TABLES
         ================================================== */
 
         [data-testid="stDataFrame"] {
             border-radius: 10px;
             overflow: hidden;
-
-            border:
-                1px solid var(--ascension-border);
+            border: 1px solid var(--ascension-border);
         }
 
 
@@ -439,28 +435,22 @@ def inject_theme() -> None:
         ================================================== */
 
         [data-testid="stDialog"] > div {
-            background-color:
-                var(--ascension-surface) !important;
+            background-color: var(--ascension-surface) !important;
         }
 
         [role="dialog"] {
-            background-color:
-                var(--ascension-surface) !important;
-
-            color:
-                var(--ascension-text) !important;
+            background-color: var(--ascension-surface) !important;
+            color: var(--ascension-text) !important;
         }
 
         [role="dialog"] h1,
         [role="dialog"] h2,
         [role="dialog"] h3 {
-            color:
-                var(--ascension-navy) !important;
+            color: var(--ascension-navy) !important;
         }
 
         [role="dialog"] p {
-            color:
-                var(--ascension-text) !important;
+            color: var(--ascension-text) !important;
         }
 
 
@@ -469,12 +459,8 @@ def inject_theme() -> None:
         ================================================== */
 
         [data-testid="stExpander"] {
-            background-color:
-                var(--ascension-surface);
-
-            border:
-                1px solid var(--ascension-border) !important;
-
+            background-color: var(--ascension-surface);
+            border-color: var(--ascension-border) !important;
             border-radius: 10px;
         }
 
@@ -487,12 +473,14 @@ def inject_theme() -> None:
             color: var(--ascension-text);
         }
 
-        [data-testid="stMetricLabel"] {
-            color: var(--ascension-text-soft);
+        [data-testid="stMetricLabel"],
+        [data-testid="stMetricLabel"] * {
+            color: var(--ascension-text-soft) !important;
         }
 
-        [data-testid="stMetricValue"] {
-            color: var(--ascension-navy);
+        [data-testid="stMetricValue"],
+        [data-testid="stMetricValue"] * {
+            color: var(--ascension-navy) !important;
         }
 
 
@@ -501,11 +489,8 @@ def inject_theme() -> None:
         ================================================== */
 
         code {
-            background-color:
-                var(--ascension-surface-soft) !important;
-
-            color:
-                var(--ascension-navy) !important;
+            background-color: var(--ascension-surface-soft) !important;
+            color: var(--ascension-navy) !important;
         }
 
 
@@ -522,7 +507,10 @@ def inject_theme() -> None:
            EXISTING CUSTOM APP CLASSES
         ================================================== */
 
-        /* Small labels / eyebrows */
+
+        /* --------------------------------------------------
+           LABELS / EYEBROWS
+        -------------------------------------------------- */
 
         .landing-parish,
         .landing-section-label,
@@ -533,27 +521,30 @@ def inject_theme() -> None:
         .review-field-label,
         .completion-kicker,
         .household-id-label {
-            color:
-                var(--ascension-label) !important;
-
+            color: var(--ascension-label) !important;
             opacity: 1 !important;
         }
 
 
-        /* Titles */
+        /* --------------------------------------------------
+           TITLES
+        -------------------------------------------------- */
 
         .landing-title,
         .completion-title,
         .landing-action-title,
         .review-ready-title,
         .review-submit-title,
-        .empty-state-title {
-            color:
-                var(--ascension-navy) !important;
+        .empty-state-title,
+        .progress-title,
+        .next-steps-title {
+            color: var(--ascension-navy) !important;
         }
 
 
-        /* Main explanatory copy */
+        /* --------------------------------------------------
+           MAIN BODY / EXPLANATORY COPY
+        -------------------------------------------------- */
 
         .landing-welcome,
         .landing-welcome *,
@@ -566,32 +557,54 @@ def inject_theme() -> None:
         .review-submit-copy,
         .review-submit-copy *,
         .household-id-help,
-        .household-id-help * {
+        .household-id-help *,
+        .completion-copy,
+        .completion-copy * {
             color: #47505A !important;
             opacity: 1 !important;
         }
 
 
-        /* Quiet helper text */
+        /* --------------------------------------------------
+           QUIET HELPER TEXT
+        -------------------------------------------------- */
 
         .landing-recovery,
         .landing-recovery *,
         .privacy-note,
-        .privacy-note * {
-            color:
-                var(--ascension-text-quiet) !important;
-
+        .privacy-note *,
+        .completion-footer,
+        .completion-footer * {
+            color: var(--ascension-text-quiet) !important;
             opacity: 1 !important;
         }
 
 
-        /* Review values */
+        /* --------------------------------------------------
+           REVIEW VALUES
+        -------------------------------------------------- */
 
         .review-person-name,
         .review-child-name,
-        .review-field-value {
-            color:
-                var(--ascension-text) !important;
+        .review-field-value,
+        .review-check,
+        .next-step {
+            color: var(--ascension-text) !important;
+        }
+
+
+        /* --------------------------------------------------
+           PROGRESS STATES
+        -------------------------------------------------- */
+
+        .progress-complete,
+        .progress-needed {
+            color: var(--ascension-text) !important;
+        }
+
+        .progress-waiting {
+            color: var(--ascension-text-soft) !important;
+            opacity: 1 !important;
         }
 
 
@@ -600,8 +613,7 @@ def inject_theme() -> None:
         ================================================== */
 
         [data-testid="stSidebar"] {
-            background-color:
-                var(--ascension-surface-soft);
+            background-color: var(--ascension-surface-soft);
         }
 
 
@@ -610,7 +622,7 @@ def inject_theme() -> None:
         ================================================== */
 
         [data-testid="stHeader"] {
-            background-color: #0E1117;
+            background-color: transparent;
         }
 
         </style>

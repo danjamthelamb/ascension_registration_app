@@ -6,6 +6,7 @@ import re
 from io import BytesIO
 from datetime import date, timedelta
 from pathlib import Path
+from textwrap import dedent
 
 import pandas as pd
 import streamlit as st
@@ -20,6 +21,15 @@ from reportlab.platypus import (
     Table,
     TableStyle,
 )
+from openpyxl import Workbook
+from openpyxl.styles import (
+    Alignment,
+    Border,
+    Font,
+    PatternFill,
+    Side,
+)
+from openpyxl.utils import get_column_letter
 from ui_theme import inject_theme
 
 
@@ -46,17 +56,6 @@ from email_service import (
     send_update_confirmation,
     send_verification_email,
 )
-
-from io import BytesIO
-from openpyxl import Workbook
-from openpyxl.styles import (
-    Alignment,
-    Border,
-    Font,
-    PatternFill,
-    Side,
-)
-from openpyxl.utils import get_column_letter
 
 
 # ---------------------------------------------------------
@@ -351,23 +350,24 @@ st.markdown(
 
     .completion-logo {
         text-align: center;
-        margin-bottom: 1rem;
+        margin-bottom: 0.8rem;
     }
 
     .completion-logo img {
-        width: 105px;
-        max-width: 30vw;
+        width: 92px;
+        max-width: 28vw;
         height: auto;
     }
 
     .completion-kicker {
         text-align: center;
-        font-size: 0.78rem;
-        font-weight: 700;
-        letter-spacing: 0.09em;
+        font-size: 0.72rem;
+        font-weight: 800;
+        letter-spacing: 0.11em;
         text-transform: uppercase;
-        opacity: 0.55;
-        margin-bottom: 0.4rem;
+        color: #586A82;
+        opacity: 1;
+        margin-bottom: 0.45rem;
     }
 
     .completion-title {
@@ -375,52 +375,140 @@ st.markdown(
         font-size: 2rem;
         font-weight: 800;
         line-height: 1.15;
-        margin-bottom: 0.65rem;
+        color: #203A5C;
+        margin-bottom: 0.55rem;
     }
 
     .completion-copy {
         text-align: center;
-        max-width: 570px;
-        margin: 0 auto 1.75rem auto;
-        font-size: 0.98rem;
+        max-width: 590px;
+        margin: 0 auto 1.5rem auto;
+        font-size: 0.96rem;
         line-height: 1.55;
-        opacity: 0.72;
+        color: #505861;
+        opacity: 1;
     }
 
-    .household-id-label {
+    .completion-summary {
+        background: #FFFDFC;
+        border: 1px solid #D8D0C5;
+        border-radius: 14px;
+        padding: 1.35rem 1.5rem;
+        margin: 1.25rem 0 1.15rem 0;
         text-align: center;
-        font-size: 0.76rem;
-        font-weight: 700;
-        letter-spacing: 0.08em;
+        box-shadow: 0 2px 8px rgba(32, 58, 92, 0.035);
+    }
+
+    .completion-id-label {
+        color: #586A82;
+        font-size: 0.72rem;
+        font-weight: 800;
+        letter-spacing: 0.1em;
         text-transform: uppercase;
-        opacity: 0.55;
-        margin-bottom: 0.25rem;
-    }
-
-    .household-id-help {
-        text-align: center;
-        font-size: 0.87rem;
-        line-height: 1.5;
-        opacity: 0.65;
-        margin-top: 0.5rem;
-    }
-
-    .next-steps-title {
-        font-size: 1.05rem;
-        font-weight: 700;
         margin-bottom: 0.55rem;
     }
 
-    .next-step {
-        font-size: 0.92rem;
-        line-height: 1.65;
+    .completion-id-value {
+        display: inline-block;
+        background: #F2EEE6;
+        color: #203A5C;
+        border: 1px solid #D8D0C5;
+        border-radius: 8px;
+        padding: 0.7rem 1.15rem;
+        font-family: "Courier New", Courier, monospace;
+        font-size: 1.2rem;
+        line-height: 1.1;
+        font-weight: 700;
+        letter-spacing: 0.055em;
+        margin-bottom: 0.85rem;
+    }
+
+    .completion-id-help {
+        color: #505861;
+        font-size: 0.87rem;
+        line-height: 1.5;
+        max-width: 525px;
+        margin: 0 auto;
+    }
+
+    .completion-email-success {
+        display: flex;
+        align-items: flex-start;
+        gap: 0.6rem;
+        background: #E8F1E5;
+        border: 1px solid #C9DDC4;
+        border-radius: 10px;
+        padding: 0.85rem 1rem;
+        margin-top: 1rem;
+        text-align: left;
+        color: #354638;
+        font-size: 0.9rem;
+        line-height: 1.45;
+    }
+
+    .completion-email-success strong {
+        color: #2F4132;
+    }
+
+    .completion-email-check {
+        color: #5F775C;
+        font-weight: 800;
+        line-height: 1.45;
+        flex: 0 0 auto;
+    }
+
+    .completion-email-warning {
+        background: #F7EEDC;
+        border: 1px solid #E3D1AD;
+        border-radius: 10px;
+        padding: 0.85rem 1rem;
+        margin-top: 1rem;
+        color: #5D4A27;
+        font-size: 0.9rem;
+        line-height: 1.45;
+        text-align: left;
+    }
+
+    .completion-next {
+        background: #FFFDFC;
+        border: 1px solid #D8D0C5;
+        border-radius: 12px;
+        padding: 1.15rem 1.3rem;
+        margin: 1rem 0 1.35rem 0;
+        box-shadow: 0 2px 8px rgba(32, 58, 92, 0.025);
+    }
+
+    .completion-next-title {
+        color: #203A5C;
+        font-size: 1rem;
+        font-weight: 750;
+        margin-bottom: 0.7rem;
+    }
+
+    .completion-next-item {
+        color: #3F4750;
+        font-size: 0.9rem;
+        line-height: 1.55;
+        margin-bottom: 0.3rem;
+    }
+
+    .completion-next-item:last-child {
+        margin-bottom: 0;
+    }
+
+    .completion-next-check {
+        color: #6A8068;
+        font-weight: 800;
+        margin-right: 0.35rem;
     }
 
     .completion-footer {
         text-align: center;
-        margin-top: 2rem;
-        font-size: 0.77rem;
-        opacity: 0.42;
+        margin-top: 1.45rem;
+        font-size: 0.75rem;
+        line-height: 1.55;
+        color: #626A72;
+        opacity: 0.85;
     }
 
     </style>
@@ -1695,6 +1783,506 @@ def build_roster_pdf(
     buffer.close()
 
     return pdf_data
+
+
+# ---------------------------------------------------------
+# Attendance sheet
+# ---------------------------------------------------------
+
+def get_next_sundays(
+    start_date: date,
+    count: int = 8,
+) -> list[date]:
+
+    days_until_sunday = (
+        6 - start_date.weekday()
+    ) % 7
+
+    first_sunday = (
+        start_date
+        + timedelta(
+            days=days_until_sunday
+        )
+    )
+
+    return [
+        first_sunday
+        + timedelta(
+            weeks=index
+        )
+        for index in range(
+            count
+        )
+    ]
+
+
+def build_attendance_sheet(
+    title: str,
+    classroom: str,
+    catechists: str,
+    children: list[dict],
+) -> bytes:
+
+    report_date = date.today()
+
+    sundays = get_next_sundays(
+        report_date,
+        count=8,
+    )
+
+    workbook = Workbook()
+    sheet = workbook.active
+    sheet.title = "Attendance"
+
+    navy = "203A5C"
+    light_header = "EAEFF4"
+    alternate_fill = "FAF8F4"
+    border_color = "C8BFB4"
+
+    thin_side = Side(
+        style="thin",
+        color=border_color,
+    )
+
+    cell_border = Border(
+        left=thin_side,
+        right=thin_side,
+        top=thin_side,
+        bottom=thin_side,
+    )
+
+    # -----------------------------------------------------
+    # Column layout
+    # -----------------------------------------------------
+
+    sheet.column_dimensions["A"].width = 28
+    sheet.column_dimensions["B"].width = 11
+
+    for column_number in range(
+        3,
+        11,
+    ):
+
+        column_letter = get_column_letter(
+            column_number
+        )
+
+        sheet.column_dimensions[
+            column_letter
+        ].width = 10
+
+    # -----------------------------------------------------
+    # Title
+    # -----------------------------------------------------
+
+    sheet.merge_cells(
+        "A1:J1"
+    )
+
+    title_cell = sheet["A1"]
+
+    title_cell.value = (
+        "Ascension Catholic Church  |  "
+        "Attendance Sheet"
+    )
+
+    title_cell.font = Font(
+        size=16,
+        bold=True,
+        color=navy,
+    )
+
+    title_cell.alignment = Alignment(
+        horizontal="left",
+        vertical="center",
+    )
+
+    sheet.row_dimensions[1].height = 28
+
+    # -----------------------------------------------------
+    # Roster information
+    # -----------------------------------------------------
+
+    sheet["A3"] = "Term:"
+
+    sheet.merge_cells(
+        "B3:C3"
+    )
+
+    sheet["B3"] = (
+        FAITH_FORMATION_TERM
+    )
+
+    sheet.merge_cells(
+        "D3:E3"
+    )
+
+    sheet["D3"] = (
+        "Grade / Program:"
+    )
+
+    sheet.merge_cells(
+        "F3:G3"
+    )
+
+    sheet["F3"] = title
+
+    sheet["H3"] = "Room:"
+
+    sheet.merge_cells(
+        "I3:J3"
+    )
+
+    sheet["I3"] = (
+        classroom.strip()
+        or "Not assigned"
+    )
+
+    sheet["A4"] = "Catechists:"
+
+    sheet.merge_cells(
+        "B4:J4"
+    )
+
+    sheet["B4"] = (
+        catechists.strip()
+        or "Not assigned"
+    )
+
+    for cell_coordinate in (
+        "A3",
+        "D3",
+        "H3",
+        "A4",
+    ):
+
+        sheet[
+            cell_coordinate
+        ].font = Font(
+            bold=True,
+            color=navy,
+        )
+
+    for cell_coordinate in (
+        "A3",
+        "B3",
+        "D3",
+        "F3",
+        "H3",
+        "I3",
+        "A4",
+        "B4",
+    ):
+
+        sheet[
+            cell_coordinate
+        ].alignment = Alignment(
+            vertical="center",
+        )
+
+    # -----------------------------------------------------
+    # Catechist attendance
+    # -----------------------------------------------------
+
+    catechist_header_row = 6
+
+    sheet.cell(
+        row=catechist_header_row,
+        column=1,
+        value="Catechists",
+    )
+
+    for index, sunday in enumerate(
+        sundays,
+        start=3,
+    ):
+
+        cell = sheet.cell(
+            row=catechist_header_row,
+            column=index,
+            value=sunday,
+        )
+
+        cell.number_format = "m/d"
+
+    for column_number in range(
+        1,
+        11,
+    ):
+
+        cell = sheet.cell(
+            row=catechist_header_row,
+            column=column_number,
+        )
+
+        cell.font = Font(
+            bold=True,
+            color=navy,
+        )
+
+        cell.fill = PatternFill(
+            fill_type="solid",
+            fgColor=light_header,
+        )
+
+        cell.border = cell_border
+
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+        )
+
+    sheet.cell(
+        row=catechist_header_row,
+        column=1,
+    ).alignment = Alignment(
+        horizontal="left",
+        vertical="center",
+    )
+
+    catechist_names = [
+        name.strip()
+        for name in catechists.split(",")
+        if name.strip()
+    ]
+
+    if not catechist_names:
+        catechist_names = [
+            ""
+        ]
+
+    current_row = (
+        catechist_header_row + 1
+    )
+
+    for catechist_name in catechist_names:
+
+        sheet.cell(
+            row=current_row,
+            column=1,
+            value=catechist_name,
+        )
+
+        for column_number in range(
+            1,
+            11,
+        ):
+
+            cell = sheet.cell(
+                row=current_row,
+                column=column_number,
+            )
+
+            cell.border = cell_border
+
+            cell.alignment = Alignment(
+                horizontal=(
+                    "left"
+                    if column_number == 1
+                    else "center"
+                ),
+                vertical="center",
+            )
+
+        sheet.row_dimensions[
+            current_row
+        ].height = 22
+
+        current_row += 1
+
+    # -----------------------------------------------------
+    # Student attendance
+    # -----------------------------------------------------
+
+    student_header_row = (
+        current_row + 2
+    )
+
+    sheet.cell(
+        row=student_header_row,
+        column=1,
+        value="Student Name",
+    )
+
+    sheet.cell(
+        row=student_header_row,
+        column=2,
+        value="Grade",
+    )
+
+    for index, sunday in enumerate(
+        sundays,
+        start=3,
+    ):
+
+        cell = sheet.cell(
+            row=student_header_row,
+            column=index,
+            value=sunday,
+        )
+
+        cell.number_format = "m/d"
+
+    for column_number in range(
+        1,
+        11,
+    ):
+
+        cell = sheet.cell(
+            row=student_header_row,
+            column=column_number,
+        )
+
+        cell.font = Font(
+            bold=True,
+            color=navy,
+        )
+
+        cell.fill = PatternFill(
+            fill_type="solid",
+            fgColor=light_header,
+        )
+
+        cell.border = cell_border
+
+        cell.alignment = Alignment(
+            horizontal="center",
+            vertical="center",
+        )
+
+    sheet.cell(
+        row=student_header_row,
+        column=1,
+    ).alignment = Alignment(
+        horizontal="left",
+        vertical="center",
+    )
+
+    current_row = (
+        student_header_row + 1
+    )
+
+    for child in children:
+
+        child_name = full_name(
+            child.get(
+                "first_name"
+            ),
+            child.get(
+                "middle_name"
+            ),
+            child.get(
+                "last_name"
+            ),
+        )
+
+        sheet.cell(
+            row=current_row,
+            column=1,
+            value=child_name,
+        )
+
+        sheet.cell(
+            row=current_row,
+            column=2,
+            value=child.get(
+                "grade",
+                "",
+            ),
+        )
+
+        for column_number in range(
+            1,
+            11,
+        ):
+
+            cell = sheet.cell(
+                row=current_row,
+                column=column_number,
+            )
+
+            cell.border = cell_border
+
+            cell.alignment = Alignment(
+                horizontal=(
+                    "left"
+                    if column_number == 1
+                    else "center"
+                ),
+                vertical="center",
+            )
+
+        if (
+            current_row
+            % 2 == 0
+        ):
+
+            for column_number in range(
+                1,
+                11,
+            ):
+
+                sheet.cell(
+                    row=current_row,
+                    column=column_number,
+                ).fill = PatternFill(
+                    fill_type="solid",
+                    fgColor=alternate_fill,
+                )
+
+        sheet.row_dimensions[
+            current_row
+        ].height = 23
+
+        current_row += 1
+
+    # -----------------------------------------------------
+    # Workbook / print settings
+    # -----------------------------------------------------
+
+    # Deliberately leave panes unfrozen so the top metadata
+    # does not remain locked while scrolling the student list.
+    sheet.freeze_panes = None
+
+    sheet.sheet_view.showGridLines = False
+
+    sheet.page_setup.orientation = (
+        "landscape"
+    )
+
+    sheet.page_setup.paperSize = (
+        sheet.PAPERSIZE_LETTER
+    )
+
+    sheet.page_setup.fitToWidth = 1
+    sheet.page_setup.fitToHeight = 0
+
+    sheet.sheet_properties.pageSetUpPr.fitToPage = (
+        True
+    )
+
+    sheet.print_options.horizontalCentered = (
+        True
+    )
+
+    sheet.page_margins.left = 0.25
+    sheet.page_margins.right = 0.25
+    sheet.page_margins.top = 0.4
+    sheet.page_margins.bottom = 0.4
+
+    sheet.print_area = (
+        f"A1:J{max(current_row - 1, student_header_row)}"
+    )
+
+    output = BytesIO()
+
+    workbook.save(
+        output
+    )
+
+    output.seek(0)
+
+    return output.getvalue()
 
 
 # ---------------------------------------------------------
@@ -3535,6 +4123,14 @@ def child_dialog(
         )
     )
 
+    today = date.today()
+
+    earliest_birth_date = date(
+        today.year - 20,
+        1,
+        1,
+    )
+
     date_of_birth = (
         st.date_input(
             "Date of birth",
@@ -3542,7 +4138,8 @@ def child_dialog(
                 "date_of_birth",
                 None,
             ),
-            max_value=date.today(),
+            min_value=earliest_birth_date,
+            max_value=today,
         )
     )
 
@@ -4476,536 +5073,6 @@ def review_dialog():
 # ---------------------------------------------------------
 # Roster card
 # ---------------------------------------------------------
-# ---------------------------------------------------------
-# Attendance sheet helpers
-# ---------------------------------------------------------
-
-def get_next_sundays(
-    start_date: date,
-    count: int = 8,
-) -> list[date]:
-    """
-    Return the next `count` Sundays beginning
-    with the upcoming Sunday.
-
-    If the report is generated on a Sunday,
-    that Sunday is included.
-    """
-
-    days_until_sunday = (
-        6 - start_date.weekday()
-    ) % 7
-
-    first_sunday = (
-        start_date
-        + timedelta(
-            days=days_until_sunday
-        )
-    )
-
-    return [
-        first_sunday
-        + timedelta(
-            weeks=index
-        )
-        for index in range(count)
-    ]
-
-
-def school_year_label(
-    report_date: date,
-) -> str:
-    """
-    Return the faith formation school year.
-
-    Example:
-        August 2026 -> 2026-2027
-        January 2027 -> 2026-2027
-    """
-
-    if report_date.month >= 7:
-
-        start_year = (
-            report_date.year
-        )
-
-    else:
-
-        start_year = (
-            report_date.year - 1
-        )
-
-    return (
-        f"{start_year}-"
-        f"{start_year + 1}"
-    )
-
-
-def build_attendance_sheet(
-    title: str,
-    group_key: str,
-    children: list[dict],
-    catechists: str,
-    classroom: str,
-) -> bytes:
-    """
-    Build an Excel attendance sheet containing
-    the next eight Sundays.
-    """
-
-    report_date = date.today()
-
-    sundays = (
-        get_next_sundays(
-            report_date,
-            count=8,
-        )
-    )
-
-    workbook = Workbook()
-
-    sheet = workbook.active
-    sheet.title = "Attendance"
-
-    # -----------------------------------------------------
-    # Colors / styles
-    # -----------------------------------------------------
-
-    navy = "263B59"
-    light_header = "E8EDF3"
-    light_fill = "F7F8FA"
-    white = "FFFFFF"
-    border_color = "B8B8B8"
-
-    thin_side = Side(
-        style="thin",
-        color=border_color,
-    )
-
-    cell_border = Border(
-        left=thin_side,
-        right=thin_side,
-        top=thin_side,
-        bottom=thin_side,
-    )
-
-    # -----------------------------------------------------
-    # Column layout
-    # -----------------------------------------------------
-
-    # A = Student/Catechist name
-    # B = Grade
-    # C:J = Eight Sundays
-
-    sheet.column_dimensions["A"].width = 28
-    sheet.column_dimensions["B"].width = 11
-
-    for column_number in range(
-        3,
-        11,
-    ):
-
-        column_letter = (
-            get_column_letter(
-                column_number
-            )
-        )
-
-        sheet.column_dimensions[
-            column_letter
-        ].width = 10
-
-    # -----------------------------------------------------
-    # Title
-    # -----------------------------------------------------
-
-    sheet.merge_cells(
-        "A1:J1"
-    )
-
-    title_cell = sheet["A1"]
-
-    title_cell.value = (
-        "Ascension Catholic Church  |  "
-        "Attendance Sheet"
-    )
-
-    title_cell.font = Font(
-        size=16,
-        bold=True,
-        color=navy,
-    )
-
-    title_cell.alignment = Alignment(
-        horizontal="left",
-        vertical="center",
-    )
-
-    sheet.row_dimensions[1].height = 28
-
-    # -----------------------------------------------------
-    # Roster information
-    # -----------------------------------------------------
-
-    # Term
-    sheet["A3"] = "Term:"
-
-    sheet.merge_cells("B3:C3")
-    sheet["B3"] = school_year_label(
-        report_date
-    )
-
-    # Grade / Program
-    sheet.merge_cells("D3:E3")
-    sheet["D3"] = "Grade / Program:"
-
-    sheet.merge_cells("F3:G3")
-    sheet["F3"] = title
-
-    # Room
-    sheet["H3"] = "Room:"
-
-    sheet.merge_cells("I3:J3")
-    sheet["I3"] = (
-        classroom.strip()
-        if classroom.strip()
-        else "Not assigned"
-    )
-
-    # Catechists
-    sheet["A4"] = "Catechists:"
-
-    sheet.merge_cells("B4:J4")
-    sheet["B4"] = (
-        catechists.strip()
-        if catechists.strip()
-        else "Not assigned"
-    )
-
-    # Bold labels
-    for cell_coordinate in (
-        "A3",
-        "D3",
-        "H3",
-        "A4",
-    ):
-        sheet[cell_coordinate].font = Font(
-            bold=True,
-            color=navy,
-        )
-
-    # -----------------------------------------------------
-    # Catechist attendance
-    # -----------------------------------------------------
-
-    catechist_header_row = 6
-
-    sheet.cell(
-        row=catechist_header_row,
-        column=1,
-        value="Catechists",
-    )
-
-    sheet.cell(
-        row=catechist_header_row,
-        column=2,
-        value="",
-    )
-
-    for index, sunday in enumerate(
-        sundays,
-        start=3,
-    ):
-
-        cell = sheet.cell(
-            row=catechist_header_row,
-            column=index,
-            value=sunday,
-        )
-
-        cell.number_format = "m/d"
-
-    for column_number in range(
-        1,
-        11,
-    ):
-
-        cell = sheet.cell(
-            row=catechist_header_row,
-            column=column_number,
-        )
-
-        cell.font = Font(
-            bold=True,
-            color=navy,
-        )
-
-        cell.fill = PatternFill(
-            fill_type="solid",
-            fgColor=light_header,
-        )
-
-        cell.border = (
-            cell_border
-        )
-
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-        )
-
-    sheet.cell(
-        row=catechist_header_row,
-        column=1,
-    ).alignment = Alignment(
-        horizontal="left",
-        vertical="center",
-    )
-
-    catechist_names = [
-        name.strip()
-
-        for name in (
-            catechists.split(",")
-        )
-
-        if name.strip()
-    ]
-
-    if not catechist_names:
-
-        catechist_names = [
-            ""
-        ]
-
-    current_row = (
-        catechist_header_row + 1
-    )
-
-    for catechist_name in catechist_names:
-
-        sheet.cell(
-            row=current_row,
-            column=1,
-            value=catechist_name,
-        )
-
-        for column_number in range(
-            1,
-            11,
-        ):
-
-            cell = sheet.cell(
-                row=current_row,
-                column=column_number,
-            )
-
-            cell.border = (
-                cell_border
-            )
-
-            cell.alignment = Alignment(
-                horizontal=(
-                    "left"
-                    if column_number == 1
-                    else "center"
-                ),
-                vertical="center",
-            )
-
-        sheet.row_dimensions[
-            current_row
-        ].height = 22
-
-        current_row += 1
-
-    # -----------------------------------------------------
-    # Student attendance
-    # -----------------------------------------------------
-
-    student_header_row = (
-        current_row + 2
-    )
-
-    sheet.cell(
-        row=student_header_row,
-        column=1,
-        value="Student Name",
-    )
-
-    sheet.cell(
-        row=student_header_row,
-        column=2,
-        value="Grade",
-    )
-
-    for index, sunday in enumerate(
-        sundays,
-        start=3,
-    ):
-
-        cell = sheet.cell(
-            row=student_header_row,
-            column=index,
-            value=sunday,
-        )
-
-        cell.number_format = "m/d"
-
-    for column_number in range(
-        1,
-        11,
-    ):
-
-        cell = sheet.cell(
-            row=student_header_row,
-            column=column_number,
-        )
-
-        cell.font = Font(
-            bold=True,
-            color=navy,
-        )
-
-        cell.fill = PatternFill(
-            fill_type="solid",
-            fgColor=light_header,
-        )
-
-        cell.border = (
-            cell_border
-        )
-
-        cell.alignment = Alignment(
-            horizontal="center",
-            vertical="center",
-        )
-
-    sheet.cell(
-        row=student_header_row,
-        column=1,
-    ).alignment = Alignment(
-        horizontal="left",
-        vertical="center",
-    )
-
-    current_row = (
-        student_header_row + 1
-    )
-
-    for child in children:
-
-        child_name = full_name(
-            child.get(
-                "first_name"
-            ),
-            child.get(
-                "middle_name"
-            ),
-            child.get(
-                "last_name"
-            ),
-        )
-
-        sheet.cell(
-            row=current_row,
-            column=1,
-            value=child_name,
-        )
-
-        sheet.cell(
-            row=current_row,
-            column=2,
-            value=child.get(
-                "grade",
-                "",
-            ),
-        )
-
-        for column_number in range(
-            1,
-            11,
-        ):
-
-            cell = sheet.cell(
-                row=current_row,
-                column=column_number,
-            )
-
-            cell.border = (
-                cell_border
-            )
-
-            cell.alignment = Alignment(
-                horizontal=(
-                    "left"
-                    if column_number == 1
-                    else "center"
-                ),
-                vertical="center",
-            )
-
-        if (
-            current_row
-            % 2 == 0
-        ):
-
-            for column_number in range(
-                1,
-                11,
-            ):
-
-                sheet.cell(
-                    row=current_row,
-                    column=column_number,
-                ).fill = PatternFill(
-                    fill_type="solid",
-                    fgColor=light_fill,
-                )
-
-        sheet.row_dimensions[
-            current_row
-        ].height = 23
-
-        current_row += 1
-
-    # -----------------------------------------------------
-    # Printing
-    # -----------------------------------------------------
-
-    sheet.freeze_panes = None
-
-    sheet.sheet_view.showGridLines = False
-
-    sheet.page_setup.orientation = (
-        "landscape"
-    )
-
-    sheet.page_setup.fitToWidth = 1
-    sheet.page_setup.fitToHeight = 0
-
-    sheet.sheet_properties.pageSetUpPr.fitToPage = (
-        True
-    )
-
-    sheet.print_options.horizontalCentered = (
-        True
-    )
-
-    sheet.page_margins.left = 0.25
-    sheet.page_margins.right = 0.25
-    sheet.page_margins.top = 0.4
-    sheet.page_margins.bottom = 0.4
-
-    output = BytesIO()
-
-    workbook.save(
-        output
-    )
-
-    output.seek(0)
-
-    return output.getvalue()
 
 def render_roster_card(
     group: dict,
@@ -5326,13 +5393,16 @@ def render_roster_card(
             ),
         )
 
+
         attendance_data = (
             build_attendance_sheet(
                 title=title,
-                group_key=group_key,
-                children=group_children,
+                classroom=(
+                    classroom_value
+                    .strip()
+                ),
                 catechists=catechists,
-                classroom=classroom,
+                children=group_children,
             )
         )
 
@@ -5354,6 +5424,10 @@ def render_roster_card(
                 f"{group_key}"
             ),
             use_container_width=True,
+            help=(
+                "Download an Excel attendance sheet for the next "
+                "8 Sundays."
+            ),
         )
 
 
@@ -6172,118 +6246,89 @@ if (
             )
         )
 
-        st.markdown(
-            f"""
-            <div class="completion-logo">
-                <img
-                    src="{logo_url}"
-                    alt="Ascension Catholic Church"
-                >
-            </div>
-            """,
-            unsafe_allow_html=True,
+        st.html(
+            dedent(
+                f"""
+                <div class="completion-logo">
+                    <img
+                        src="{logo_url}"
+                        alt="Ascension Catholic Church"
+                    >
+                </div>
+                """
+            )
         )
 
     if editing_existing:
 
-        st.markdown(
-            """
-            <div class="completion-kicker">
-                Registration Updated
-            </div>
+        st.html(
+            dedent(
+                """
+                <div class="completion-kicker">
+                    Registration Updated
+                </div>
 
-            <div class="completion-title">
-                Your changes have been saved.
-            </div>
+                <div class="completion-title">
+                    Your changes have been saved.
+                </div>
 
-            <div class="completion-copy">
-                Thank you! Your household registration has been
-                updated successfully with Ascension Catholic Church.
-            </div>
-            """,
-            unsafe_allow_html=True,
+                <div class="completion-copy">
+                    Your family's Faith Formation registration
+                    has been updated successfully.
+                </div>
+                """
+            )
         )
 
     else:
 
-        st.markdown(
-            """
-            <div class="completion-kicker">
-                Registration Complete
-            </div>
-
-            <div class="completion-title">
-                You're all set!
-            </div>
-
-            <div class="completion-copy">
-                Thank you for registering your family for
-                faith formation at Ascension Catholic Church.
-                Your registration has been received successfully.
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-    with st.container(
-        border=True,
-        key="completion_household_id_card",
-    ):
-
-        st.markdown(
-            """
-            <div class="household-id-label">
-                Your Household ID
-            </div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.code(
-            household_reference,
-            language=None,
-        )
-
-        if editing_existing:
-
-            st.markdown(
+        st.html(
+            dedent(
                 """
-                <div class="household-id-help">
-                    Keep this Household ID for any future changes
-                    to your family's registration.
+                <div class="completion-kicker">
+                    Registration Complete
                 </div>
-                """,
-                unsafe_allow_html=True,
-            )
 
-        else:
+                <div class="completion-title">
+                    You're all set!
+                </div>
 
-            st.markdown(
+                <div class="completion-copy">
+                    Thank you for registering your family for
+                    Faith Formation at Ascension Catholic Church.
+                </div>
                 """
-                <div class="household-id-help">
-                    Please keep this ID. You'll use it if you need
-                    to return later to add a child or update your
-                    household registration.
-                </div>
-                """,
-                unsafe_allow_html=True,
             )
+        )
 
-    st.write("")
+
+    # -----------------------------------------------------
+    # Household ID / email confirmation
+    # -----------------------------------------------------
+
+    email_status_html = ""
 
     if (
         st.session_state.confirmation_email_sent
         is True
     ):
 
-        st.success(
-            "Confirmation sent to "
-            f"{st.session_state.confirmation_email_address}"
+        email_address = escape_html(
+            st.session_state.confirmation_email_address
+            or ""
         )
 
-        st.caption(
-            "Your confirmation email also includes "
-            "your Household ID."
+        email_status_html = dedent(
+            f"""
+            <div class="completion-email-success">
+                <span class="completion-email-check">✓</span>
+                <span>
+                    Confirmation sent to
+                    <strong>{email_address}</strong>.
+                    Your email also includes your Household ID.
+                </span>
+            </div>
+            """
         )
 
     elif (
@@ -6291,77 +6336,168 @@ if (
         is False
     ):
 
-        st.warning(
-            "Your registration was saved successfully, "
-            "but we couldn't send the confirmation email."
+        email_status_html = dedent(
+            """
+            <div class="completion-email-warning">
+                Your registration was saved successfully,
+                but we couldn't send the confirmation email.
+                Please make a note of your Household ID before
+                leaving this page.
+            </div>
+            """
         )
 
-        st.caption(
-            "Your registration is still complete. "
-            "Please make a note of your Household ID "
-            "before leaving this page."
+    if editing_existing:
+
+        id_help = (
+            "Keep this Household ID for future changes "
+            "to your family's registration."
         )
 
-    with st.container(
-        border=True,
-        key="completion_next_steps_card",
-    ):
+    else:
 
-        if editing_existing:
+        id_help = (
+            "Keep this Household ID somewhere handy. "
+            "You'll use it if you need to return later "
+            "to update your registration."
+        )
 
-            st.markdown(
-                """
-                <div class="next-steps-title">
+    summary_html = (
+        dedent(
+            f"""
+            <div class="completion-summary">
+                <div class="completion-id-label">
+                    Your Household ID
+                </div>
+
+                <div class="completion-id-value">
+                    {escape_html(household_reference)}
+                </div>
+
+                <div class="completion-id-help">
+                    {escape_html(id_help)}
+                </div>
+            """
+        )
+        + email_status_html
+        + "\n</div>"
+    )
+
+    st.html(
+        summary_html
+    )
+
+
+    # -----------------------------------------------------
+    # Next steps
+    # -----------------------------------------------------
+
+    if editing_existing:
+
+        next_steps_html = dedent(
+            """
+            <div class="completion-next-item">
+                <span class="completion-next-check">✓</span>
+                Your updated information is now on file.
+            </div>
+
+            <div class="completion-next-item">
+                <span class="completion-next-check">✓</span>
+                Ascension staff can see your changes immediately.
+            </div>
+
+            <div class="completion-next-item">
+                <span class="completion-next-check">✓</span>
+                You can return later using the same Household ID.
+            </div>
+            """
+        )
+
+    else:
+
+        next_steps_html = dedent(
+            """
+            <div class="completion-next-item">
+                <span class="completion-next-check">✓</span>
+                Your household and children are registered.
+            </div>
+
+            <div class="completion-next-item">
+                <span class="completion-next-check">✓</span>
+                Ascension staff will review your registration.
+            </div>
+
+            <div class="completion-next-item">
+                <span class="completion-next-check">✓</span>
+                We'll contact you if any sacramental follow-up
+                is needed.
+            </div>
+
+            <div class="completion-next-item">
+                <span class="completion-next-check">✓</span>
+                You can return later using your Household ID
+                if anything changes.
+            </div>
+            """
+        )
+
+    next_steps_card = (
+        dedent(
+            """
+            <div class="completion-next">
+                <div class="completion-next-title">
                     What happens next?
                 </div>
+            """
+        )
+        + next_steps_html
+        + "\n</div>"
+    )
 
-                <div class="next-step">
-                    ✓ Your updated information is now on file.<br>
-                    ✓ Ascension staff can see the changes immediately.<br>
-                    ✓ You can return again later using the same Household ID.
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+    st.html(
+        next_steps_card
+    )
 
-        else:
 
-            st.markdown(
-                """
-                <div class="next-steps-title">
-                    What happens next?
-                </div>
+    # -----------------------------------------------------
+    # Done
+    # -----------------------------------------------------
 
-                <div class="next-step">
-                    ✓ Your household and children are now registered.<br>
-                    ✓ Ascension staff will review the registration.<br>
-                    ✓ If sacramental follow-up is needed,
-                    a member of the faith formation team will contact you.<br>
-                    ✓ You can return later using your Household ID
-                    if anything changes.
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+    done_left, done_center, done_right = (
+        st.columns(
+            [
+                1.3,
+                1,
+                1.3,
+            ]
+        )
+    )
 
-    st.write("")
+    with done_center:
 
-    if st.button(
-        "Done",
-        type="primary",
-        use_container_width=True,
-    ):
+        if st.button(
+            "Done",
+            type="primary",
+            use_container_width=True,
+        ):
 
-        reset_public_registration_state()
-        st.rerun()
+            reset_public_registration_state()
+            st.rerun()
+
+
+    # -----------------------------------------------------
+    # Footer
+    # -----------------------------------------------------
 
     st.markdown(
-        """
-        <div class="completion-footer">
-            Ascension Catholic Church<br>
-            Faith Formation Registration
-        </div>
-        """,
+        dedent(
+            """
+            <div class="completion-footer">
+                Ascension Catholic Church<br>
+                Faith Formation Registration
+            </div>
+            """
+        ),
         unsafe_allow_html=True,
     )
 

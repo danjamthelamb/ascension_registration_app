@@ -2285,6 +2285,217 @@ def build_attendance_sheet(
     return output.getvalue()
 
 
+
+# ---------------------------------------------------------
+# Upcoming birthdays
+# ---------------------------------------------------------
+
+def get_upcoming_birthdays(
+    roster: list[dict],
+) -> pd.DataFrame:
+    """
+    Return upcoming birthdays for all registered children.
+
+    Groups:
+    - Pre-K through Grade 5 -> PSR
+    - Grades 6-8 -> EDGE
+    - Grades 9-12 -> Life Teen
+
+    Includes:
+    - birthdays still remaining in the current month
+    - all birthdays in the next calendar month
+
+    Results are ordered by ministry group:
+    PSR, EDGE, Life Teen, then by birthday date.
+    """
+
+    today = date.today()
+
+    current_month = today.month
+
+    if current_month == 12:
+        next_month = 1
+        next_month_year = today.year + 1
+    else:
+        next_month = current_month + 1
+        next_month_year = today.year
+
+    group_order = {
+        "PSR": 0,
+        "EDGE": 1,
+        "Life Teen": 2,
+    }
+
+    rows = []
+
+    for child in roster:
+
+        grade = str(
+            child.get(
+                "grade",
+                "",
+            )
+            or ""
+        )
+
+        if grade in (
+            "Pre-K",
+            "K",
+            "1",
+            "2",
+            "3",
+            "4",
+            "5",
+        ):
+            ministry_group = "PSR"
+
+        elif grade in (
+            "6",
+            "7",
+            "8",
+        ):
+            ministry_group = "EDGE"
+
+        elif grade in (
+            "9",
+            "10",
+            "11",
+            "12",
+        ):
+            ministry_group = "Life Teen"
+
+        else:
+            # Ignore records without a recognized grade.
+            continue
+
+        date_of_birth = child.get(
+            "date_of_birth"
+        )
+
+        if not isinstance(
+            date_of_birth,
+            date,
+        ):
+            continue
+
+        if date_of_birth.month == current_month:
+            birthday_year = today.year
+
+        elif date_of_birth.month == next_month:
+            birthday_year = next_month_year
+
+        else:
+            continue
+
+        try:
+
+            upcoming_birthday = date(
+                birthday_year,
+                date_of_birth.month,
+                date_of_birth.day,
+            )
+
+        except ValueError:
+            # Treat Feb. 29 birthdays as Feb. 28 in
+            # non-leap years for this planning list.
+            upcoming_birthday = date(
+                birthday_year,
+                2,
+                28,
+            )
+
+        # For the current month, don't include birthdays
+        # that have already passed.
+        if (
+            date_of_birth.month == current_month
+            and upcoming_birthday < today
+        ):
+            continue
+
+        child_name = full_name(
+            child.get(
+                "first_name"
+            ),
+            child.get(
+                "middle_name"
+            ),
+            child.get(
+                "last_name"
+            ),
+        )
+
+        rows.append(
+            {
+                "_group_order":
+                    group_order[
+                        ministry_group
+                    ],
+
+                "_sort_date":
+                    upcoming_birthday,
+
+                "Group":
+                    ministry_group,
+
+                "Child":
+                    child_name,
+
+                "Birthday":
+                    upcoming_birthday.strftime(
+                        "%m/%d/%Y"
+                    ),
+
+                "Turning":
+                    birthday_year
+                    - date_of_birth.year,
+
+                "Grade":
+                    child_grade_label(
+                        grade
+                    ),
+
+                "School":
+                    child.get(
+                        "school",
+                        "",
+                    )
+                    or "",
+            }
+        )
+
+    rows.sort(
+        key=lambda row: (
+            row["_group_order"],
+            row["_sort_date"],
+            row["Child"].casefold(),
+        )
+    )
+
+    for row in rows:
+
+        row.pop(
+            "_group_order",
+            None,
+        )
+
+        row.pop(
+            "_sort_date",
+            None,
+        )
+
+    return pd.DataFrame(
+        rows,
+        columns=[
+            "Group",
+            "Child",
+            "Birthday",
+            "Turning",
+            "Grade",
+            "School",
+        ],
+    )
+
+
 # ---------------------------------------------------------
 # Session state
 # ---------------------------------------------------------
@@ -5451,10 +5662,11 @@ if (
 
         st.rerun()
 
-    title_col, logout_col = (
+    title_col, refresh_col, logout_col = (
         st.columns(
             [
-                5,
+                4.5,
+                1.25,
                 1.25,
             ],
             vertical_alignment="center",
@@ -5471,6 +5683,18 @@ if (
             f"Admin Dashboard • "
             f"{st.session_state.admin_email}"
         )
+
+    with refresh_col:
+
+        if st.button(
+            "↻ Refresh",
+            use_container_width=True,
+            help="Reload registration data without signing out.",
+        ):
+
+            # Rerun the Streamlit script while preserving the
+            # current Session State, including admin authentication.
+            st.rerun()
 
     with logout_col:
 
@@ -5653,6 +5877,90 @@ if (
             group,
             roster,
         )
+
+    # -----------------------------------------------------
+    # Upcoming birthdays
+    # -----------------------------------------------------
+
+    birthday_df = (
+        get_upcoming_birthdays(
+            roster
+        )
+    )
+
+    today = date.today()
+
+    next_month_date = (
+        date(
+            today.year + 1,
+            1,
+            1,
+        )
+        if today.month == 12
+        else date(
+            today.year,
+            today.month + 1,
+            1,
+        )
+    )
+
+    birthday_month_label = (
+        f"{today.strftime('%B')} & "
+        f"{next_month_date.strftime('%B')}"
+    )
+
+    with st.expander(
+        (
+            "🎂 Upcoming Birthdays · "
+            f"{birthday_month_label} "
+            f"({len(birthday_df)})"
+        ),
+        expanded=False,
+    ):
+
+        st.caption(
+            "Grouped PSR • EDGE • Life Teen • Remaining birthdays "
+            "this month and all birthdays next month."
+        )
+
+        if birthday_df.empty:
+
+            st.info(
+                "No upcoming birthdays in this period."
+            )
+
+        else:
+
+            st.dataframe(
+                birthday_df,
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            birthday_csv = (
+                birthday_df
+                .to_csv(
+                    index=False
+                )
+                .encode(
+                    "utf-8-sig"
+                )
+            )
+
+            st.download_button(
+                "Download Birthday List",
+                data=birthday_csv,
+                file_name=(
+                    "ascension-birthdays-"
+                    f"{today.strftime('%Y-%m')}-"
+                    f"{next_month_date.strftime('%Y-%m')}.csv"
+                ),
+                mime="text/csv",
+                use_container_width=True,
+                help=(
+                    "Download this birthday list as a CSV file."
+                ),
+            )
 
     st.divider()
 

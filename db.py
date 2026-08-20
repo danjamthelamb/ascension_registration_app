@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import secrets
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 
 import psycopg
@@ -22,21 +24,62 @@ VERIFICATION_MAX_ATTEMPTS = 5
 # Database connection
 # ---------------------------------------------------------
 
+def _get_database_url() -> str:
+    """
+    Resolve the PostgreSQL connection URL.
+
+    Priority:
+        1. DATABASE_URL environment variable
+        2. Streamlit secrets
+
+    Streamlit handles the TOML parsing for us, including
+    multiline arrays and other valid TOML syntax.
+    """
+
+    environment_url = (
+        os.getenv(
+            "DATABASE_URL",
+            "",
+        )
+        .strip()
+    )
+
+    if environment_url:
+        return environment_url
+
+    try:
+
+        streamlit_url = str(
+            st.secrets[
+                "database"
+            ][
+                "url"
+            ]
+        ).strip()
+
+        if streamlit_url:
+            return streamlit_url
+
+    except Exception as exc:
+
+        raise RuntimeError(
+            "No database URL was found in DATABASE_URL "
+            "or [database].url in .streamlit/secrets.toml."
+        ) from exc
+
+    raise RuntimeError(
+        "No database URL was found in DATABASE_URL "
+        "or [database].url in .streamlit/secrets.toml."
+    )
+
+
 def _connect() -> psycopg.Connection:
     """
-    Open a connection to the PostgreSQL database.
-
-    The connection URL is stored in:
-        .streamlit/secrets.toml
-
-    [database]
-    url = "postgresql://..."
+    Open a PostgreSQL connection using the configured URL.
     """
 
-    database_url = st.secrets["database"]["url"]
-
     return psycopg.connect(
-        database_url,
+        _get_database_url(),
         row_factory=dict_row,
     )
 
@@ -314,6 +357,275 @@ def init_db() -> None:
             ALTER TABLE roster_groups
             ADD COLUMN IF NOT EXISTS
                 classroom TEXT NOT NULL DEFAULT '';
+            """
+        )
+
+        # -------------------------------------------------
+        # Household messaging
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS messages (
+                message_id BIGSERIAL PRIMARY KEY,
+
+                created_at TIMESTAMPTZ NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP,
+
+                created_by TEXT NOT NULL,
+
+                message_text TEXT NOT NULL,
+
+                audiences TEXT[] NOT NULL
+                    DEFAULT '{}'::TEXT[],
+
+                status TEXT NOT NULL
+                    DEFAULT 'draft',
+
+                is_test BOOLEAN NOT NULL
+                    DEFAULT FALSE,
+
+                request_key TEXT,
+
+                CONSTRAINT chk_messages_status
+                    CHECK (
+                        status IN (
+                            'draft',
+                            'queued',
+                            'completed',
+                            'partial',
+                            'failed',
+                            'cancelled'
+                        )
+                    )
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_messages_created_at
+            ON messages (created_at DESC);
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_messages_status
+            ON messages (status);
+            """
+        )
+
+        # -------------------------------------------------
+        # Household message recipient snapshots
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS message_recipients (
+                recipient_id BIGSERIAL PRIMARY KEY,
+
+                message_id BIGINT NOT NULL,
+
+                household_reference TEXT NOT NULL,
+
+                contact_name TEXT NOT NULL,
+                phone TEXT NOT NULL,
+                contact_source TEXT NOT NULL,
+
+                children TEXT NOT NULL
+                    DEFAULT '',
+
+                status TEXT NOT NULL
+                    DEFAULT 'draft',
+
+                claimed_at TIMESTAMPTZ,
+                claim_token TEXT,
+
+                submitted_at TIMESTAMPTZ,
+                sent_at TIMESTAMPTZ,
+
+                transport TEXT,
+                error_message TEXT,
+
+                CONSTRAINT fk_message_recipient_message
+                    FOREIGN KEY (message_id)
+                    REFERENCES messages (message_id)
+                    ON DELETE CASCADE,
+
+                CONSTRAINT uq_message_household
+                    UNIQUE (
+                        message_id,
+                        household_reference
+                    ),
+
+                CONSTRAINT chk_message_recipient_status
+                    CHECK (
+                        status IN (
+                            'draft',
+                            'queued',
+                            'claimed',
+                            'submitted',
+                            'sent',
+                            'failed',
+                            'cancelled'
+                        )
+                    )
+            );
+            """
+        )
+
+        # -------------------------------------------------
+        # Household messaging migrations
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            ALTER TABLE message_recipients
+            ADD COLUMN IF NOT EXISTS
+                claimed_at TIMESTAMPTZ;
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE message_recipients
+            ADD COLUMN IF NOT EXISTS
+                claim_token TEXT;
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE message_recipients
+            ADD COLUMN IF NOT EXISTS
+                submitted_at TIMESTAMPTZ;
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE message_recipients
+            ADD COLUMN IF NOT EXISTS
+                transport TEXT;
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE messages
+            ADD COLUMN IF NOT EXISTS
+                is_test BOOLEAN NOT NULL DEFAULT FALSE;
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_messages_test_status
+            ON messages (is_test, status);
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE messages
+            ADD COLUMN IF NOT EXISTS
+                request_key TEXT;
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                uq_messages_test_request_key
+            ON messages (request_key)
+            WHERE is_test = TRUE
+              AND request_key IS NOT NULL;
+            """
+        )
+
+        # Recreate status checks so existing DEV databases
+        # gain the new queue / gateway states safely.
+        conn.execute(
+            """
+            ALTER TABLE messages
+            DROP CONSTRAINT IF EXISTS
+                chk_messages_status;
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE messages
+            ADD CONSTRAINT
+                chk_messages_status
+            CHECK (
+                status IN (
+                    'draft',
+                    'queued',
+                    'completed',
+                    'partial',
+                    'failed',
+                    'cancelled'
+                )
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE message_recipients
+            DROP CONSTRAINT IF EXISTS
+                chk_message_recipient_status;
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE message_recipients
+            ADD CONSTRAINT
+                chk_message_recipient_status
+            CHECK (
+                status IN (
+                    'draft',
+                    'queued',
+                    'claimed',
+                    'submitted',
+                    'sent',
+                    'failed',
+                    'cancelled'
+                )
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_message_recipients_message_id
+            ON message_recipients (message_id);
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_message_recipients_queue
+            ON message_recipients (
+                status,
+                recipient_id
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_message_recipients_status
+            ON message_recipients (status);
             """
         )
 
@@ -2166,3 +2478,1338 @@ def update_roster_group_classroom(
                 f"Unknown roster group: "
                 f"{group_key}"
             )
+
+
+# ---------------------------------------------------------
+# Household messaging
+# ---------------------------------------------------------
+
+def create_message_draft(
+    created_by: str,
+    message_text: str,
+    audiences: list[str],
+    recipients: list[dict],
+) -> int:
+    """
+    Create one message draft and snapshot its resolved
+    household recipients.
+
+    This function does not send anything.
+
+    Each recipient dict should contain:
+        Household ID
+        Contact
+        Phone
+        Using
+        Children
+
+    One household may appear only once per message.
+    """
+
+    created_by = (
+        created_by
+        .strip()
+        .lower()
+    )
+
+    message_text = (
+        message_text
+        .strip()
+    )
+
+    audiences = [
+        str(audience).strip()
+
+        for audience in audiences
+
+        if str(audience).strip()
+    ]
+
+    if not created_by:
+
+        raise ValueError(
+            "Message creator cannot be empty."
+        )
+
+    if not message_text:
+
+        raise ValueError(
+            "Message text cannot be empty."
+        )
+
+    if not audiences:
+
+        raise ValueError(
+            "At least one audience must be selected."
+        )
+
+    if not recipients:
+
+        raise ValueError(
+            "At least one recipient is required."
+        )
+
+    seen_households = set()
+
+    with _connect() as conn:
+
+        message_row = conn.execute(
+            """
+            INSERT INTO messages (
+                created_by,
+                message_text,
+                audiences,
+                status
+            )
+            VALUES (
+                %s,
+                %s,
+                %s,
+                'draft'
+            )
+            RETURNING message_id;
+            """,
+            (
+                created_by,
+                message_text,
+                audiences,
+            ),
+        ).fetchone()
+
+        message_id = message_row[
+            "message_id"
+        ]
+
+        for recipient in recipients:
+
+            household_reference = str(
+                recipient.get(
+                    "Household ID",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            contact_name = str(
+                recipient.get(
+                    "Contact",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            phone = str(
+                recipient.get(
+                    "Phone",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            contact_source = str(
+                recipient.get(
+                    "Using",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            children = str(
+                recipient.get(
+                    "Children",
+                    "",
+                )
+                or ""
+            ).strip()
+
+            if not household_reference:
+
+                raise ValueError(
+                    "Recipient Household ID cannot be empty."
+                )
+
+            if household_reference in seen_households:
+
+                raise ValueError(
+                    "A household may only appear once "
+                    "in a message draft."
+                )
+
+            if not contact_name:
+
+                raise ValueError(
+                    f"Recipient contact name is missing for "
+                    f"{household_reference}."
+                )
+
+            if not phone:
+
+                raise ValueError(
+                    f"Recipient phone is missing for "
+                    f"{household_reference}."
+                )
+
+            if not contact_source:
+
+                raise ValueError(
+                    f"Recipient contact source is missing for "
+                    f"{household_reference}."
+                )
+
+            seen_households.add(
+                household_reference
+            )
+
+            conn.execute(
+                """
+                INSERT INTO message_recipients (
+                    message_id,
+                    household_reference,
+                    contact_name,
+                    phone,
+                    contact_source,
+                    children,
+                    status
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    'draft'
+                );
+                """,
+                (
+                    message_id,
+                    household_reference,
+                    contact_name,
+                    phone,
+                    contact_source,
+                    children,
+                ),
+            )
+
+    return message_id
+
+
+def get_message_history(
+    limit: int = 50,
+) -> list[dict]:
+    """
+    Return the most recent message drafts / messages
+    with their snapshotted recipient counts.
+    """
+
+    if limit < 1:
+
+        return []
+
+    with _connect() as conn:
+
+        rows = conn.execute(
+            """
+            SELECT
+                m.message_id,
+                m.created_at,
+                m.created_by,
+                m.message_text,
+                m.audiences,
+                m.status,
+
+                COUNT(
+                    mr.recipient_id
+                ) AS recipient_count
+
+            FROM messages AS m
+
+            LEFT JOIN message_recipients AS mr
+                ON mr.message_id = m.message_id
+
+            WHERE m.is_test = FALSE
+
+            GROUP BY
+                m.message_id,
+                m.created_at,
+                m.created_by,
+                m.message_text,
+                m.audiences,
+                m.status
+
+            ORDER BY
+                m.created_at DESC,
+                m.message_id DESC
+
+            LIMIT %s;
+            """,
+            (
+                limit,
+            ),
+        ).fetchall()
+
+    return [
+        dict(row)
+        for row in rows
+    ]
+
+
+def get_message(
+    message_id: int,
+) -> dict | None:
+    """
+    Return one message record.
+    """
+
+    with _connect() as conn:
+
+        row = conn.execute(
+            """
+            SELECT
+                message_id,
+                created_at,
+                created_by,
+                message_text,
+                audiences,
+                status
+            FROM messages
+            WHERE message_id = %s;
+            """,
+            (
+                message_id,
+            ),
+        ).fetchone()
+
+    if row is None:
+
+        return None
+
+    return dict(
+        row
+    )
+
+
+def get_message_recipients(
+    message_id: int,
+) -> list[dict]:
+    """
+    Return the snapshotted recipients for one message.
+    """
+
+    with _connect() as conn:
+
+        rows = conn.execute(
+            """
+            SELECT
+                recipient_id,
+                message_id,
+                household_reference,
+                contact_name,
+                phone,
+                contact_source,
+                children,
+                status,
+                claimed_at,
+                claim_token,
+                submitted_at,
+                sent_at,
+                transport,
+                error_message
+            FROM message_recipients
+            WHERE message_id = %s
+            ORDER BY
+                household_reference,
+                recipient_id;
+            """,
+            (
+                message_id,
+            ),
+        ).fetchall()
+
+    return [
+        dict(row)
+        for row in rows
+    ]
+
+
+def delete_message_draft(
+    message_id: int,
+) -> bool:
+    """
+    Delete one unsent draft and all of its recipient snapshots.
+
+    Returns True if a draft was deleted.
+    Returns False if the message does not exist or is no
+    longer in draft status.
+    """
+
+    with _connect() as conn:
+
+        cursor = conn.execute(
+            """
+            DELETE FROM messages
+            WHERE message_id = %s
+              AND status = 'draft';
+            """,
+            (
+                message_id,
+            ),
+        )
+
+        return (
+            cursor.rowcount
+            > 0
+        )
+
+
+
+# ---------------------------------------------------------
+# DEV gateway test messages
+# ---------------------------------------------------------
+
+def create_gateway_test_message(
+    created_by: str,
+    contact_name: str,
+    phone: str,
+    message_text: str,
+    request_key: str,
+) -> int:
+    """
+    Create and immediately queue one DEV-only gateway test.
+
+    request_key makes this operation idempotent. If Streamlit
+    submits the same request twice, the existing test message ID
+    is returned instead of inserting another recipient.
+    """
+
+    created_by = created_by.strip().lower()
+    contact_name = contact_name.strip()
+    phone = phone.strip()
+    message_text = message_text.strip()
+    request_key = request_key.strip()
+
+    if not created_by:
+        raise ValueError(
+            "Message creator cannot be empty."
+        )
+
+    if not contact_name:
+        raise ValueError(
+            "Test recipient name cannot be empty."
+        )
+
+    if not phone:
+        raise ValueError(
+            "Test phone number cannot be empty."
+        )
+
+    phone_digits = "".join(
+        character
+        for character in phone
+        if character.isdigit()
+    )
+
+    if len(phone_digits) < 10:
+        raise ValueError(
+            "Enter a complete test phone number."
+        )
+
+    if not message_text:
+        raise ValueError(
+            "Test message cannot be empty."
+        )
+
+    if not request_key:
+        raise ValueError(
+            "Gateway test request key cannot be empty."
+        )
+
+    test_reference = (
+        "DEV-TEST-"
+        + secrets.token_hex(6).upper()
+    )
+
+    with _connect() as conn:
+
+        existing = conn.execute(
+            """
+            SELECT message_id
+            FROM messages
+            WHERE is_test = TRUE
+              AND request_key = %s
+            LIMIT 1;
+            """,
+            (request_key,),
+        ).fetchone()
+
+        if existing is not None:
+            return existing["message_id"]
+
+        message_row = conn.execute(
+            """
+            INSERT INTO messages (
+                created_by,
+                message_text,
+                audiences,
+                status,
+                is_test,
+                request_key
+            )
+            VALUES (
+                %s,
+                %s,
+                %s,
+                'queued',
+                TRUE,
+                %s
+            )
+            ON CONFLICT DO NOTHING
+            RETURNING message_id;
+            """,
+            (
+                created_by,
+                message_text,
+                ["Gateway Test"],
+                request_key,
+            ),
+        ).fetchone()
+
+        if message_row is None:
+            existing = conn.execute(
+                """
+                SELECT message_id
+                FROM messages
+                WHERE is_test = TRUE
+                  AND request_key = %s
+                LIMIT 1;
+                """,
+                (request_key,),
+            ).fetchone()
+
+            if existing is None:
+                raise RuntimeError(
+                    "Gateway test could not be created or recovered."
+                )
+
+            return existing["message_id"]
+
+        message_id = message_row["message_id"]
+
+        conn.execute(
+            """
+            INSERT INTO message_recipients (
+                message_id,
+                household_reference,
+                contact_name,
+                phone,
+                contact_source,
+                children,
+                status
+            )
+            VALUES (
+                %s,
+                %s,
+                %s,
+                %s,
+                'Manual DEV Test',
+                'DEV gateway test recipient',
+                'queued'
+            );
+            """,
+            (
+                message_id,
+                test_reference,
+                contact_name,
+                phone,
+            ),
+        )
+
+    return message_id
+
+def get_gateway_test_messages(
+    limit: int = 20,
+) -> list[dict]:
+    """
+    Return recent DEV gateway test messages and their one
+    manually entered recipient.
+    """
+
+    if limit < 1:
+        return []
+
+    with _connect() as conn:
+
+        rows = conn.execute(
+            """
+            SELECT
+                m.message_id,
+                m.created_at,
+                m.created_by,
+                m.message_text,
+                m.status,
+                m.is_test,
+
+                mr.recipient_id,
+                mr.household_reference,
+                mr.contact_name,
+                mr.phone,
+                mr.status AS recipient_status,
+                mr.claimed_at,
+                mr.submitted_at,
+                mr.sent_at,
+                mr.transport,
+                mr.error_message
+
+            FROM messages AS m
+
+            INNER JOIN message_recipients AS mr
+                ON mr.message_id = m.message_id
+
+            WHERE m.is_test = TRUE
+
+            ORDER BY
+                m.created_at DESC,
+                m.message_id DESC
+
+            LIMIT %s;
+            """,
+            (
+                limit,
+            ),
+        ).fetchall()
+
+    return [
+        dict(row)
+        for row in rows
+    ]
+
+
+def cancel_gateway_test_message(
+    message_id: int,
+) -> bool:
+    """
+    Cancel a DEV-only test only while it is still queued.
+
+    Claimed tests are owned by a Pixel claim token and must be
+    cancelled from that Pixel. This prevents a Streamlit/phone
+    race where the web app cancels an item while Android is
+    preparing to send it.
+    """
+
+    with _connect() as conn:
+
+        message = conn.execute(
+            """
+            SELECT
+                m.message_id,
+                m.is_test,
+                mr.recipient_id,
+                mr.status AS recipient_status
+            FROM messages AS m
+            INNER JOIN message_recipients AS mr
+                ON mr.message_id = m.message_id
+            WHERE m.message_id = %s
+            FOR UPDATE OF m, mr;
+            """,
+            (message_id,),
+        ).fetchone()
+
+        if (
+            message is None
+            or not message["is_test"]
+            or message["recipient_status"] != "queued"
+        ):
+            return False
+
+        conn.execute(
+            """
+            UPDATE message_recipients
+            SET
+                status = 'cancelled',
+                claim_token = NULL,
+                error_message = NULL
+            WHERE recipient_id = %s
+              AND status = 'queued';
+            """,
+            (message["recipient_id"],),
+        )
+
+        conn.execute(
+            """
+            UPDATE messages
+            SET status = 'cancelled'
+            WHERE message_id = %s;
+            """,
+            (message_id,),
+        )
+
+    return True
+
+def _refresh_message_status(
+    conn: psycopg.Connection,
+    message_id: int,
+) -> None:
+    """
+    Recalculate one message's summary status from its
+    recipient snapshot statuses.
+    """
+
+    rows = conn.execute(
+        """
+        SELECT status
+        FROM message_recipients
+        WHERE message_id = %s;
+        """,
+        (
+            message_id,
+        ),
+    ).fetchall()
+
+    statuses = [
+        row[
+            "status"
+        ]
+        for row in rows
+    ]
+
+    if not statuses:
+        return
+
+    if any(
+        status in (
+            "queued",
+            "claimed",
+        )
+        for status in statuses
+    ):
+        message_status = "queued"
+
+    elif all(
+        status in (
+            "submitted",
+            "sent",
+        )
+        for status in statuses
+    ):
+        message_status = "completed"
+
+    elif all(
+        status == "failed"
+        for status in statuses
+    ):
+        message_status = "failed"
+
+    elif any(
+        status in (
+            "submitted",
+            "sent",
+            "failed",
+        )
+        for status in statuses
+    ):
+        message_status = "partial"
+
+    elif all(
+        status == "cancelled"
+        for status in statuses
+    ):
+        message_status = "cancelled"
+
+    else:
+        return
+
+    conn.execute(
+        """
+        UPDATE messages
+        SET status = %s
+        WHERE message_id = %s;
+        """,
+        (
+            message_status,
+            message_id,
+        ),
+    )
+
+
+def queue_message(
+    message_id: int,
+) -> bool:
+    """
+    Lock one saved draft into the gateway queue.
+
+    Once queued, its recipient snapshot is no longer
+    editable or deletable through the normal draft path.
+
+    Returns True when the draft was queued.
+    Returns False when it was not an eligible draft.
+    """
+
+    with _connect() as conn:
+
+        message = conn.execute(
+            """
+            SELECT
+                message_id,
+                status
+            FROM messages
+            WHERE message_id = %s
+            FOR UPDATE;
+            """,
+            (
+                message_id,
+            ),
+        ).fetchone()
+
+        if (
+            message is None
+            or message[
+                "status"
+            ] != "draft"
+        ):
+            return False
+
+        recipient_count = conn.execute(
+            """
+            SELECT COUNT(*) AS count
+            FROM message_recipients
+            WHERE message_id = %s
+              AND status = 'draft';
+            """,
+            (
+                message_id,
+            ),
+        ).fetchone()[
+            "count"
+        ]
+
+        if recipient_count < 1:
+            return False
+
+        conn.execute(
+            """
+            UPDATE message_recipients
+            SET
+                status = 'queued',
+                claimed_at = NULL,
+                claim_token = NULL,
+                submitted_at = NULL,
+                sent_at = NULL,
+                transport = NULL,
+                error_message = NULL
+            WHERE message_id = %s
+              AND status = 'draft';
+            """,
+            (
+                message_id,
+            ),
+        )
+
+        conn.execute(
+            """
+            UPDATE messages
+            SET status = 'queued'
+            WHERE message_id = %s;
+            """,
+            (
+                message_id,
+            ),
+        )
+
+    return True
+
+
+def claim_next_queued_test_recipient() -> dict | None:
+    """
+    Atomically reserve the next queued DEV test recipient.
+
+    This function can never claim a real parish household because
+    it requires messages.is_test = TRUE.
+    """
+
+    claim_token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+
+    with _connect() as conn:
+
+        row = conn.execute(
+            """
+            SELECT
+                mr.recipient_id,
+                mr.message_id,
+                mr.household_reference,
+                mr.contact_name,
+                mr.phone,
+                mr.contact_source,
+                mr.children,
+                m.message_text,
+                m.audiences,
+                m.is_test
+            FROM message_recipients AS mr
+            INNER JOIN messages AS m
+                ON m.message_id = mr.message_id
+            WHERE mr.status = 'queued'
+              AND m.status = 'queued'
+              AND m.is_test = TRUE
+            ORDER BY
+                m.created_at,
+                m.message_id,
+                mr.recipient_id
+            FOR UPDATE OF mr
+            SKIP LOCKED
+            LIMIT 1;
+            """
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        recipient_id = row["recipient_id"]
+
+        conn.execute(
+            """
+            UPDATE message_recipients
+            SET
+                status = 'claimed',
+                claimed_at = %s,
+                claim_token = %s
+            WHERE recipient_id = %s
+              AND status = 'queued';
+            """,
+            (now, claim_token, recipient_id),
+        )
+
+        result = dict(row)
+        result["claim_token"] = claim_token
+        result["claimed_at"] = now
+        return result
+
+
+def claim_next_queued_recipient() -> dict | None:
+    """
+    Atomically reserve the next queued household recipient
+    for one gateway device.
+
+    There is intentionally no automatic timeout / retry.
+    If a device disappears after claiming an item, that item
+    remains claimed so the system never guesses that it is
+    safe to send the household a duplicate message.
+    """
+
+    claim_token = (
+        secrets.token_urlsafe(
+            32
+        )
+    )
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    with _connect() as conn:
+
+        row = conn.execute(
+            """
+            SELECT
+                mr.recipient_id,
+                mr.message_id,
+                mr.household_reference,
+                mr.contact_name,
+                mr.phone,
+                mr.contact_source,
+                mr.children,
+
+                m.message_text,
+                m.audiences,
+                m.is_test
+
+            FROM message_recipients AS mr
+
+            INNER JOIN messages AS m
+                ON m.message_id = mr.message_id
+
+            WHERE mr.status = 'queued'
+              AND m.status = 'queued'
+
+            ORDER BY
+                m.is_test DESC,
+                m.created_at,
+                m.message_id,
+                mr.recipient_id
+
+            FOR UPDATE OF mr
+            SKIP LOCKED
+
+            LIMIT 1;
+            """
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        recipient_id = row[
+            "recipient_id"
+        ]
+
+        conn.execute(
+            """
+            UPDATE message_recipients
+            SET
+                status = 'claimed',
+                claimed_at = %s,
+                claim_token = %s
+            WHERE recipient_id = %s;
+            """,
+            (
+                now,
+                claim_token,
+                recipient_id,
+            ),
+        )
+
+        result = dict(
+            row
+        )
+
+        result[
+            "claim_token"
+        ] = claim_token
+
+        result[
+            "claimed_at"
+        ] = now
+
+        return result
+
+
+def _update_claimed_recipient(
+    recipient_id: int,
+    claim_token: str,
+    new_status: str,
+    *,
+    transport: str | None = None,
+    error_message: str | None = None,
+) -> bool:
+    """
+    Update a gateway-owned recipient only when its private
+    claim token matches.
+    """
+
+    claim_token = (
+        claim_token
+        .strip()
+    )
+
+    if not claim_token:
+        return False
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    with _connect() as conn:
+
+        recipient = conn.execute(
+            """
+            SELECT
+                recipient_id,
+                message_id,
+                status
+            FROM message_recipients
+            WHERE recipient_id = %s
+              AND claim_token = %s
+            FOR UPDATE;
+            """,
+            (
+                recipient_id,
+                claim_token,
+            ),
+        ).fetchone()
+
+        if recipient is None:
+            return False
+
+        current_status = recipient[
+            "status"
+        ]
+
+        allowed_transitions = {
+            "claimed": {
+                "submitted",
+                "sent",
+                "failed",
+            },
+            "submitted": {
+                "sent",
+                "failed",
+            },
+        }
+
+        if (
+            new_status
+            not in allowed_transitions.get(
+                current_status,
+                set(),
+            )
+        ):
+            return False
+
+        submitted_at = (
+            now
+            if new_status in (
+                "submitted",
+                "sent",
+            )
+            else None
+        )
+
+        sent_at = (
+            now
+            if new_status == "sent"
+            else None
+        )
+
+        conn.execute(
+            """
+            UPDATE message_recipients
+            SET
+                status = %s,
+
+                submitted_at =
+                    CASE
+                        WHEN %s IS NOT NULL
+                            THEN COALESCE(
+                                submitted_at,
+                                %s
+                            )
+                        ELSE submitted_at
+                    END,
+
+                sent_at =
+                    CASE
+                        WHEN %s IS NOT NULL
+                            THEN %s
+                        ELSE sent_at
+                    END,
+
+                transport =
+                    COALESCE(
+                        %s,
+                        transport
+                    ),
+
+                error_message = %s
+
+            WHERE recipient_id = %s
+              AND claim_token = %s;
+            """,
+            (
+                new_status,
+
+                submitted_at,
+                submitted_at,
+
+                sent_at,
+                sent_at,
+
+                transport,
+
+                error_message,
+
+                recipient_id,
+                claim_token,
+            ),
+        )
+
+        _refresh_message_status(
+            conn,
+            recipient[
+                "message_id"
+            ],
+        )
+
+    return True
+
+
+def cancel_claimed_test_recipient(
+    recipient_id: int,
+    claim_token: str,
+) -> bool:
+    """
+    Cancel a claimed DEV test from the Pixel that owns the claim.
+
+    Only is_test = TRUE records in CLAIMED state can transition
+    this way. Submitted/sent items can never be cancelled here.
+    """
+
+    claim_token = claim_token.strip()
+    if not claim_token:
+        return False
+
+    with _connect() as conn:
+
+        recipient = conn.execute(
+            """
+            SELECT
+                mr.recipient_id,
+                mr.message_id,
+                mr.status,
+                m.is_test
+            FROM message_recipients AS mr
+            INNER JOIN messages AS m
+                ON m.message_id = mr.message_id
+            WHERE mr.recipient_id = %s
+              AND mr.claim_token = %s
+            FOR UPDATE OF mr;
+            """,
+            (recipient_id, claim_token),
+        ).fetchone()
+
+        if (
+            recipient is None
+            or not recipient["is_test"]
+            or recipient["status"] != "claimed"
+        ):
+            return False
+
+        conn.execute(
+            """
+            UPDATE message_recipients
+            SET
+                status = 'cancelled',
+                error_message = NULL
+            WHERE recipient_id = %s
+              AND claim_token = %s
+              AND status = 'claimed';
+            """,
+            (recipient_id, claim_token),
+        )
+
+        _refresh_message_status(
+            conn,
+            recipient["message_id"],
+        )
+
+    return True
+
+
+def mark_recipient_submitted(
+    recipient_id: int,
+    claim_token: str,
+    transport: str = "android_auto",
+) -> bool:
+    """
+    Record that Android accepted the send request.
+
+    For an RCS-upgraded recipient this may be the strongest
+    callback available to our companion app, so SUBMITTED is
+    treated as a terminal no-auto-retry state.
+    """
+
+    return _update_claimed_recipient(
+        recipient_id,
+        claim_token,
+        "submitted",
+        transport=transport,
+    )
+
+
+def mark_recipient_sent(
+    recipient_id: int,
+    claim_token: str,
+    transport: str = "sms",
+) -> bool:
+    """
+    Record a positive transport callback, such as the normal
+    SMS sent PendingIntent result.
+    """
+
+    return _update_claimed_recipient(
+        recipient_id,
+        claim_token,
+        "sent",
+        transport=transport,
+    )
+
+
+def mark_recipient_failed(
+    recipient_id: int,
+    claim_token: str,
+    error_message: str,
+    transport: str = "android_auto",
+) -> bool:
+    """
+    Record a definite send failure reported by the device.
+    """
+
+    return _update_claimed_recipient(
+        recipient_id,
+        claim_token,
+        "failed",
+        transport=transport,
+        error_message=(
+            error_message
+            .strip()
+            or "Unknown gateway failure"
+        ),
+    )
+
+
+def get_gateway_queue_summary() -> dict:
+    """
+    Return recipient counts by gateway status.
+    """
+
+    with _connect() as conn:
+
+        rows = conn.execute(
+            """
+            SELECT
+                status,
+                COUNT(*) AS count
+            FROM message_recipients
+            GROUP BY status;
+            """
+        ).fetchall()
+
+    counts = {
+        row[
+            "status"
+        ]:
+            row[
+                "count"
+            ]
+        for row in rows
+    }
+
+    return {
+        "queued":
+            counts.get(
+                "queued",
+                0,
+            ),
+
+        "claimed":
+            counts.get(
+                "claimed",
+                0,
+            ),
+
+        "submitted":
+            counts.get(
+                "submitted",
+                0,
+            ),
+
+        "sent":
+            counts.get(
+                "sent",
+                0,
+            ),
+
+        "failed":
+            counts.get(
+                "failed",
+                0,
+            ),
+    }
+

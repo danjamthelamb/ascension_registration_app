@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import html
 import re
+import uuid
 from io import BytesIO
 from datetime import date, timedelta
 from pathlib import Path
@@ -36,10 +37,18 @@ from ui_theme import inject_theme
 from db import (
     create_admin_verification,
     create_household_verification,
+    create_message_draft,
+    create_gateway_test_message,
+    cancel_gateway_test_message,
+    delete_message_draft,
     get_admin_roster,
     get_household_references_by_email,
+    get_gateway_test_messages,
+    get_message_history,
+    get_message_recipients,
     get_registration_by_reference,
     get_roster_groups,
+    queue_message,
     init_db,
     save_registration,
     update_registration,
@@ -114,6 +123,7 @@ st.markdown(
     .st-key-review_dialog_household_card,
     [class*="st-key-review_dialog_child_card_"],
     .st-key-review_dialog_submit_card,
+    .st-key-messaging_history_detail,
     [class*="st-key-roster_card_"] {
         background-color: #FFFDFC !important;
         border: 1px solid #C2B5A5 !important;
@@ -2493,6 +2503,492 @@ def get_upcoming_birthdays(
             "Grade",
             "School",
         ],
+    )
+
+
+
+# ---------------------------------------------------------
+# Household messaging helpers
+# ---------------------------------------------------------
+
+def messaging_audience_matches(
+    child: dict,
+    audiences: list[str],
+) -> bool:
+
+    if not audiences:
+        return False
+
+    if "All Households" in audiences:
+        return True
+
+    grade = str(
+        child.get(
+            "grade",
+            "",
+        )
+        or ""
+    )
+
+    matches = []
+
+    if "PSR" in audiences:
+
+        matches.append(
+            grade in (
+                "Pre-K",
+                "K",
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+            )
+        )
+
+    if "EDGE" in audiences:
+
+        matches.append(
+            grade in (
+                "6",
+                "7",
+                "8",
+            )
+        )
+
+    if "Life Teen" in audiences:
+
+        matches.append(
+            grade in (
+                "9",
+                "10",
+                "11",
+                "12",
+            )
+        )
+
+    if "Confirmation" in audiences:
+
+        matches.append(
+            bool(
+                child.get(
+                    "receiving_confirmation",
+                    False,
+                )
+            )
+        )
+
+    if "First Communion" in audiences:
+
+        matches.append(
+            bool(
+                child.get(
+                    "receiving_first_communion_reconciliation",
+                    False,
+                )
+            )
+        )
+
+    return any(
+        matches
+    )
+
+
+def household_display_name(
+    child: dict,
+) -> str:
+
+    parent_a_first = (
+        child.get(
+            "parent_a_first_name",
+            "",
+        )
+        or ""
+    ).strip()
+
+    parent_a_last = (
+        child.get(
+            "parent_a_last_name",
+            "",
+        )
+        or ""
+    ).strip()
+
+    parent_b_first = (
+        child.get(
+            "parent_b_first_name",
+            "",
+        )
+        or ""
+    ).strip()
+
+    parent_b_last = (
+        child.get(
+            "parent_b_last_name",
+            "",
+        )
+        or ""
+    ).strip()
+
+    parent_a = parent_name(
+        parent_a_first,
+        parent_a_last,
+    )
+
+    parent_b = parent_name(
+        parent_b_first,
+        parent_b_last,
+    )
+
+    if (
+        parent_a
+        and parent_b
+        and parent_a_last
+        and parent_b_last
+        and parent_a_last.casefold()
+        == parent_b_last.casefold()
+    ):
+
+        return (
+            f"{parent_a_first} & "
+            f"{parent_b_first} "
+            f"{parent_a_last}"
+        ).strip()
+
+    if parent_a and parent_b:
+        return (
+            f"{parent_a} & "
+            f"{parent_b}"
+        )
+
+    return (
+        parent_a
+        or parent_b
+        or child.get(
+            "household_reference",
+            "Household",
+        )
+    )
+
+
+def resolve_household_message_recipients(
+    roster: list[dict],
+    audiences: list[str],
+) -> tuple[
+    pd.DataFrame,
+    pd.DataFrame,
+    dict,
+]:
+
+    matched_children = [
+        child
+
+        for child in roster
+
+        if messaging_audience_matches(
+            child,
+            audiences,
+        )
+    ]
+
+    households: dict[str, dict] = {}
+
+    for child in matched_children:
+
+        household_reference = str(
+            child.get(
+                "household_reference",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if not household_reference:
+            continue
+
+        if household_reference not in households:
+
+            households[
+                household_reference
+            ] = {
+                "Household":
+                    household_display_name(
+                        child
+                    ),
+
+                "Household ID":
+                    household_reference,
+
+                "Parent A":
+                    parent_name(
+                        child.get(
+                            "parent_a_first_name"
+                        ),
+                        child.get(
+                            "parent_a_last_name"
+                        ),
+                    ),
+
+                "Parent A Phone":
+                    (
+                        child.get(
+                            "parent_a_phone"
+                        )
+                        or ""
+                    ).strip(),
+
+                "Parent B":
+                    parent_name(
+                        child.get(
+                            "parent_b_first_name"
+                        ),
+                        child.get(
+                            "parent_b_last_name"
+                        ),
+                    ),
+
+                "Parent B Phone":
+                    (
+                        child.get(
+                            "parent_b_phone"
+                        )
+                        or ""
+                    ).strip(),
+
+                "_children":
+                    [],
+            }
+
+        child_name = full_name(
+            child.get(
+                "first_name"
+            ),
+            child.get(
+                "middle_name"
+            ),
+            child.get(
+                "last_name"
+            ),
+        )
+
+        if (
+            child_name
+            and child_name
+            not in households[
+                household_reference
+            ][
+                "_children"
+            ]
+        ):
+
+            households[
+                household_reference
+            ][
+                "_children"
+            ].append(
+                child_name
+            )
+
+    recipient_rows = []
+    missing_rows = []
+
+    parent_a_count = 0
+    parent_b_count = 0
+
+    for household in households.values():
+
+        parent_a_phone = (
+            household[
+                "Parent A Phone"
+            ]
+        )
+
+        parent_b_phone = (
+            household[
+                "Parent B Phone"
+            ]
+        )
+
+        children_text = ", ".join(
+            household[
+                "_children"
+            ]
+        )
+
+        if parent_a_phone:
+
+            parent_a_count += 1
+
+            recipient_rows.append(
+                {
+                    "Household":
+                        household[
+                            "Household"
+                        ],
+
+                    "Household ID":
+                        household[
+                            "Household ID"
+                        ],
+
+                    "Contact":
+                        household[
+                            "Parent A"
+                        ]
+                        or "Parent / Guardian A",
+
+                    "Phone":
+                        parent_a_phone,
+
+                    "Using":
+                        "Parent A",
+
+                    "Children":
+                        children_text,
+                }
+            )
+
+        elif parent_b_phone:
+
+            parent_b_count += 1
+
+            recipient_rows.append(
+                {
+                    "Household":
+                        household[
+                            "Household"
+                        ],
+
+                    "Household ID":
+                        household[
+                            "Household ID"
+                        ],
+
+                    "Contact":
+                        household[
+                            "Parent B"
+                        ]
+                        or "Parent / Guardian B",
+
+                    "Phone":
+                        parent_b_phone,
+
+                    "Using":
+                        "Parent B fallback",
+
+                    "Children":
+                        children_text,
+                }
+            )
+
+        else:
+
+            missing_rows.append(
+                {
+                    "Household":
+                        household[
+                            "Household"
+                        ],
+
+                    "Household ID":
+                        household[
+                            "Household ID"
+                        ],
+
+                    "Children":
+                        children_text,
+
+                    "Issue":
+                        "No parent phone number",
+                }
+            )
+
+    recipient_df = pd.DataFrame(
+        recipient_rows,
+        columns=[
+            "Household",
+            "Household ID",
+            "Contact",
+            "Phone",
+            "Using",
+            "Children",
+        ],
+    )
+
+    missing_df = pd.DataFrame(
+        missing_rows,
+        columns=[
+            "Household",
+            "Household ID",
+            "Children",
+            "Issue",
+        ],
+    )
+
+    if not recipient_df.empty:
+
+        recipient_df = (
+            recipient_df
+            .sort_values(
+                by=[
+                    "Household",
+                    "Household ID",
+                ],
+                kind="stable",
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+    if not missing_df.empty:
+
+        missing_df = (
+            missing_df
+            .sort_values(
+                by=[
+                    "Household",
+                    "Household ID",
+                ],
+                kind="stable",
+            )
+            .reset_index(
+                drop=True
+            )
+        )
+
+    stats = {
+        "matched_children":
+            len(
+                matched_children
+            ),
+
+        "unique_households":
+            len(
+                households
+            ),
+
+        "parent_a":
+            parent_a_count,
+
+        "parent_b":
+            parent_b_count,
+
+        "missing":
+            len(
+                missing_rows
+            ),
+
+        "recipients":
+            len(
+                recipient_rows
+            ),
+    }
+
+    return (
+        recipient_df,
+        missing_df,
+        stats,
     )
 
 
@@ -5961,6 +6457,1065 @@ if (
                     "Download this birthday list as a CSV file."
                 ),
             )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Household messaging - DEV dry run only
+    # -----------------------------------------------------
+
+    with st.expander(
+        "Household Messaging",
+        expanded=False,
+    ):
+
+        st.caption(
+            "Development preview only. Household drafts can be "
+            "queued for the local Android gateway."
+        )
+
+        # -------------------------------------------------
+        # DEV gateway one-number test
+        # -------------------------------------------------
+
+        with st.expander(
+            "DEV Gateway Test - One Number",
+            expanded=True,
+        ):
+
+            st.warning(
+                "TEST ONLY. This panel never selects a parish household. "
+                "It creates exactly one queued recipient using the phone "
+                "number entered below."
+            )
+
+            test_name_col, test_phone_col = (
+                st.columns(2)
+            )
+
+            with test_name_col:
+
+                gateway_test_name = st.text_input(
+                    "Test recipient name",
+                    placeholder="Daniel / Courtney / Test Phone",
+                    key="gateway_test_name",
+                )
+
+            with test_phone_col:
+
+                gateway_test_phone = st.text_input(
+                    "Test phone number",
+                    placeholder="(304) 555-1234",
+                    key="gateway_test_phone",
+                )
+
+            gateway_test_text = st.text_area(
+                "Test message",
+                value="Ascension Messenger DEV gateway test.",
+                height=110,
+                key="gateway_test_message_text",
+            )
+
+            st.caption(
+                f"{len(gateway_test_text)} characters  •  "
+                "One manually entered recipient only"
+            )
+
+            # A stable request key makes this queue action idempotent.
+            # If Streamlit processes the same button action twice, the
+            # database returns the existing Test ID instead of inserting
+            # a second recipient.
+            payload_signature = (
+                gateway_test_name.strip(),
+                gateway_test_phone.strip(),
+                gateway_test_text.strip(),
+            )
+
+            if (
+                st.session_state.get(
+                    "gateway_test_payload_signature"
+                ) != payload_signature
+            ):
+                st.session_state.gateway_test_payload_signature = (
+                    payload_signature
+                )
+                st.session_state.gateway_test_request_key = (
+                    uuid.uuid4().hex
+                )
+                st.session_state.pop(
+                    "gateway_test_last_queued_id",
+                    None,
+                )
+
+            if not st.session_state.get(
+                "gateway_test_request_key"
+            ):
+                st.session_state.gateway_test_request_key = (
+                    uuid.uuid4().hex
+                )
+
+            gateway_test_disabled = (
+                not gateway_test_name.strip()
+                or not gateway_test_phone.strip()
+                or not gateway_test_text.strip()
+            )
+
+            if st.button(
+                "Queue One-Number Test",
+                type="primary",
+                use_container_width=True,
+                disabled=gateway_test_disabled,
+                key="queue_gateway_test_message",
+            ):
+
+                try:
+
+                    test_message_id = (
+                        create_gateway_test_message(
+                            created_by=(
+                                st.session_state.admin_email
+                                or ""
+                            ),
+                            contact_name=gateway_test_name,
+                            phone=gateway_test_phone,
+                            message_text=gateway_test_text,
+                            request_key=(
+                                st.session_state
+                                .gateway_test_request_key
+                            ),
+                        )
+                    )
+
+                    st.session_state.gateway_test_last_queued_id = (
+                        test_message_id
+                    )
+
+                    st.rerun()
+
+                except Exception as exc:
+
+                    st.error(
+                        "We couldn't queue the gateway test."
+                    )
+
+                    st.caption(
+                        f"DEV detail: {exc}"
+                    )
+
+            last_queued_test_id = st.session_state.get(
+                "gateway_test_last_queued_id"
+            )
+
+            if last_queued_test_id:
+                st.success(
+                    f"TEST #{last_queued_test_id} is queued. Repeated "
+                    "submissions of this same test request will reuse "
+                    "that Test ID instead of creating a duplicate."
+                )
+
+                if st.button(
+                    "Prepare Another Identical Test",
+                    use_container_width=True,
+                    key="prepare_another_identical_gateway_test",
+                ):
+                    st.session_state.gateway_test_request_key = (
+                        uuid.uuid4().hex
+                    )
+                    st.session_state.pop(
+                        "gateway_test_last_queued_id",
+                        None,
+                    )
+                    st.rerun()
+
+            st.write("")
+            st.markdown("**Recent gateway tests**")
+
+            try:
+
+                gateway_tests = (
+                    get_gateway_test_messages(
+                        limit=20
+                    )
+                )
+
+            except Exception as exc:
+
+                gateway_tests = []
+
+                st.error(
+                    "We couldn't load DEV gateway tests."
+                )
+
+                st.caption(
+                    f"DEV detail: {exc}"
+                )
+
+            if not gateway_tests:
+
+                st.info(
+                    "No one-number gateway tests have been queued yet."
+                )
+
+            else:
+
+                gateway_test_rows = []
+
+                for test_message in gateway_tests:
+
+                    created_at = test_message.get(
+                        "created_at"
+                    )
+
+                    created_label = (
+                        created_at.strftime(
+                            "%m/%d/%Y %I:%M %p"
+                        )
+                        if created_at is not None
+                        else ""
+                    )
+
+                    gateway_test_rows.append(
+                        {
+                            "Test ID": test_message.get(
+                                "message_id"
+                            ),
+                            "Created": created_label,
+                            "Recipient": test_message.get(
+                                "contact_name",
+                                "",
+                            ),
+                            "Phone": test_message.get(
+                                "phone",
+                                "",
+                            ),
+                            "Status": str(
+                                test_message.get(
+                                    "recipient_status",
+                                    "",
+                                )
+                            ).title(),
+                            "Message": test_message.get(
+                                "message_text",
+                                "",
+                            ),
+                        }
+                    )
+
+                st.dataframe(
+                    pd.DataFrame(
+                        gateway_test_rows
+                    ),
+                    hide_index=True,
+                    use_container_width=True,
+                    column_config={
+                        "Message":
+                            st.column_config.TextColumn(
+                                "Message",
+                                width="large",
+                            ),
+                    },
+                )
+
+                cancellable_tests = [
+                    test_message
+                    for test_message in gateway_tests
+                    if test_message.get(
+                        "recipient_status"
+                    ) == "queued"
+                ]
+
+                if cancellable_tests:
+
+                    test_by_id = {
+                        test_message[
+                            "message_id"
+                        ]:
+                            test_message
+                        for test_message
+                        in cancellable_tests
+                    }
+
+                    selected_test_id = st.selectbox(
+                        "Queued test to cancel / clear",
+                        list(
+                            test_by_id.keys()
+                        ),
+                        format_func=(
+                            lambda message_id: (
+                                f"TEST #{message_id} · "
+                                + str(
+                                    test_by_id[
+                                        message_id
+                                    ].get(
+                                        "contact_name",
+                                        "",
+                                    )
+                                )
+                                + " · Queued"
+                            )
+                        ),
+                        key="gateway_test_cancel_id",
+                    )
+
+                    if st.button(
+                        "Cancel / Clear Selected Queued Test",
+                        use_container_width=True,
+                        key=(
+                            "cancel_gateway_test_"
+                            f"{selected_test_id}"
+                        ),
+                    ):
+
+                        try:
+
+                            cancelled = (
+                                cancel_gateway_test_message(
+                                    selected_test_id
+                                )
+                            )
+
+                            if cancelled:
+
+                                if (
+                                    st.session_state.get(
+                                        "gateway_test_last_queued_id"
+                                    ) == selected_test_id
+                                ):
+                                    st.session_state.pop(
+                                        "gateway_test_last_queued_id",
+                                        None,
+                                    )
+
+                                st.success(
+                                    f"TEST #{selected_test_id} cancelled. "
+                                    "The gateway will not claim it."
+                                )
+
+                                st.rerun()
+
+                            else:
+
+                                st.warning(
+                                    "That test is no longer safely "
+                                    "cancellable from Streamlit. If the "
+                                    "Pixel has already claimed it, cancel "
+                                    "it from the Pixel instead."
+                                )
+
+                        except Exception as exc:
+
+                            st.error(
+                                "We couldn't cancel that gateway test."
+                            )
+
+                            st.caption(
+                                f"DEV detail: {exc}"
+                            )
+
+                else:
+
+                    st.caption(
+                        "No queued tests are available to cancel here. "
+                        "A claimed test must be cancelled by the Pixel "
+                        "that owns its claim token."
+                    )
+
+            st.caption(
+                "Gateway tests are isolated from parish household messages. "
+                "The Pixel's DEV test fetch endpoint can claim only records "
+                "tagged as tests."
+            )
+
+        st.divider()
+
+        audiences = st.multiselect(
+            "Audience",
+            [
+                "All Households",
+                "PSR",
+                "EDGE",
+                "Life Teen",
+                "Confirmation",
+                "First Communion",
+            ],
+            default=[
+                "EDGE",
+                "Life Teen",
+            ],
+            placeholder="Select one or more groups",
+            key="messaging_audiences",
+        )
+
+        if (
+            "All Households" in audiences
+            and len(audiences) > 1
+        ):
+
+            st.caption(
+                "All Households is selected, so the other "
+                "audience selections are included automatically."
+            )
+
+        (
+            recipient_df,
+            missing_phone_df,
+            messaging_stats,
+        ) = resolve_household_message_recipients(
+            roster,
+            audiences,
+        )
+
+        if not audiences:
+
+            st.info(
+                "Select at least one audience to build "
+                "the household recipient list."
+            )
+
+        (
+            message_metric_1,
+            message_metric_2,
+            message_metric_3,
+            message_metric_4,
+        ) = st.columns(4)
+
+        with message_metric_1:
+
+            st.metric(
+                "Children",
+                messaging_stats[
+                    "matched_children"
+                ],
+            )
+
+        with message_metric_2:
+
+            st.metric(
+                "Households",
+                messaging_stats[
+                    "unique_households"
+                ],
+            )
+
+        with message_metric_3:
+
+            st.metric(
+                "Recipients",
+                messaging_stats[
+                    "recipients"
+                ],
+            )
+
+        with message_metric_4:
+
+            st.metric(
+                "Missing Phone",
+                messaging_stats[
+                    "missing"
+                ],
+            )
+
+        st.caption(
+            f"Parent A used: {messaging_stats['parent_a']}  •  "
+            f"Parent B fallback: {messaging_stats['parent_b']}"
+        )
+
+        st.write("")
+
+        message_text = st.text_area(
+            "Message",
+            height=170,
+            placeholder=(
+                "Write the message you want to send to the "
+                "selected households..."
+            ),
+            key="messaging_message_text",
+        )
+
+        st.caption(
+            f"{len(message_text)} characters"
+        )
+
+        st.write("")
+
+        st.subheader(
+            "Recipient Preview"
+        )
+
+        if recipient_df.empty:
+
+            st.info(
+                "No households with a usable parent phone number "
+                "match this audience."
+            )
+
+        else:
+
+            st.dataframe(
+                recipient_df,
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            recipient_csv = (
+                recipient_df
+                .to_csv(
+                    index=False
+                )
+                .encode(
+                    "utf-8-sig"
+                )
+            )
+
+            st.download_button(
+                "Download Recipient List",
+                data=recipient_csv,
+                file_name=(
+                    "ascension-household-message-recipients-"
+                    + (
+                        "all-households"
+                        if "All Households" in audiences
+                        else (
+                            "-".join(
+                                audience
+                                .lower()
+                                .replace(" ", "-")
+                                for audience
+                                in audiences
+                            )
+                            or "none"
+                        )
+                    )
+                    + "-"
+                    + date.today().isoformat()
+                    + ".csv"
+                ),
+                mime="text/csv",
+                use_container_width=True,
+                key="download_message_recipients",
+            )
+
+        if not missing_phone_df.empty:
+
+            with st.expander(
+                (
+                    "Households Missing a Phone Number "
+                    f"({len(missing_phone_df)})"
+                ),
+                expanded=False,
+            ):
+
+                st.dataframe(
+                    missing_phone_df,
+                    hide_index=True,
+                    use_container_width=True,
+                )
+
+        st.write("")
+
+        message_action_disabled = (
+            not audiences
+            or recipient_df.empty
+            or not message_text.strip()
+        )
+
+        preview_col, save_col = (
+            st.columns(2)
+        )
+
+        with preview_col:
+
+            if st.button(
+                "Run Message Preview",
+                use_container_width=True,
+                disabled=message_action_disabled,
+                key="messaging_dry_run",
+            ):
+
+                st.success(
+                    f"Dry run complete. "
+                    f"{len(recipient_df)} individual household "
+                    f"{'message' if len(recipient_df) == 1 else 'messages'} "
+                    "would be queued. No texts were sent."
+                )
+
+                st.write(
+                    "**Message that would be sent:**"
+                )
+
+                st.code(
+                    message_text,
+                    language=None,
+                )
+
+        with save_col:
+
+            if st.button(
+                "Save Draft",
+                type="primary",
+                use_container_width=True,
+                disabled=message_action_disabled,
+                key="messaging_save_draft",
+            ):
+
+                try:
+
+                    message_id = (
+                        create_message_draft(
+                            created_by=(
+                                st.session_state.admin_email
+                                or ""
+                            ),
+                            message_text=message_text,
+                            audiences=audiences,
+                            recipients=(
+                                recipient_df
+                                .to_dict(
+                                    orient="records"
+                                )
+                            ),
+                        )
+                    )
+
+                    st.success(
+                        f"Draft #{message_id} saved with "
+                        f"{len(recipient_df)} household "
+                        f"{'recipient' if len(recipient_df) == 1 else 'recipients'}. "
+                        "No texts were sent."
+                    )
+
+                except Exception as exc:
+
+                    st.error(
+                        "We couldn't save this message draft. "
+                        "Please try again."
+                    )
+
+                    st.caption(
+                        f"DEV detail: {exc}"
+                    )
+
+        st.divider()
+
+        # -------------------------------------------------
+        # Message history
+        # -------------------------------------------------
+
+        st.subheader(
+            "Message History"
+        )
+
+        st.caption(
+            "Saved drafts keep a snapshot of the exact household "
+            "contacts and phone numbers selected at that time."
+        )
+
+        try:
+
+            message_history = (
+                get_message_history(
+                    limit=50
+                )
+            )
+
+        except Exception as exc:
+
+            message_history = []
+
+            st.error(
+                "We couldn't load message history."
+            )
+
+            st.caption(
+                f"DEV detail: {exc}"
+            )
+
+        if not message_history:
+
+            st.info(
+                "No message drafts have been saved yet."
+            )
+
+        else:
+
+            history_rows = []
+
+            for message in message_history:
+
+                created_at = (
+                    message.get(
+                        "created_at"
+                    )
+                )
+
+                created_label = (
+                    created_at.strftime(
+                        "%m/%d/%Y %I:%M %p"
+                    )
+                    if created_at is not None
+                    else ""
+                )
+
+                saved_audiences = (
+                    message.get(
+                        "audiences"
+                    )
+                    or []
+                )
+
+                history_rows.append(
+                    {
+                        "ID":
+                            message[
+                                "message_id"
+                            ],
+
+                        "Created":
+                            created_label,
+
+                        "Audience":
+                            ", ".join(
+                                saved_audiences
+                            ),
+
+                        "Recipients":
+                            message.get(
+                                "recipient_count",
+                                0,
+                            ),
+
+                        "Status":
+                            str(
+                                message.get(
+                                    "status",
+                                    ""
+                                )
+                            ).title(),
+
+                        "Message":
+                            message.get(
+                                "message_text",
+                                "",
+                            ),
+                    }
+                )
+
+            st.dataframe(
+                pd.DataFrame(
+                    history_rows
+                ),
+                hide_index=True,
+                use_container_width=True,
+                column_config={
+                    "Message":
+                        st.column_config.TextColumn(
+                            "Message",
+                            width="large",
+                        ),
+                },
+            )
+
+            message_by_id = {
+                message[
+                    "message_id"
+                ]:
+                    message
+
+                for message
+                in message_history
+            }
+
+            message_ids = list(
+                message_by_id.keys()
+            )
+
+            selected_message_id = (
+                st.selectbox(
+                    "Inspect saved message",
+                    message_ids,
+                    format_func=(
+                        lambda message_id: (
+                            f"Draft #{message_id} · "
+                            + ", ".join(
+                                message_by_id[
+                                    message_id
+                                ].get(
+                                    "audiences"
+                                )
+                                or []
+                            )
+                            + " · "
+                            + str(
+                                message_by_id[
+                                    message_id
+                                ].get(
+                                    "recipient_count",
+                                    0,
+                                )
+                            )
+                            + " recipients"
+                        )
+                    ),
+                    key="messaging_history_message_id",
+                )
+            )
+
+            selected_message = (
+                message_by_id[
+                    selected_message_id
+                ]
+            )
+
+            with st.container(
+                border=True,
+                key="messaging_history_detail",
+            ):
+
+                st.write(
+                    "**Saved message**"
+                )
+
+                st.code(
+                    selected_message.get(
+                        "message_text",
+                        "",
+                    ),
+                    language=None,
+                )
+
+                st.caption(
+                    "Audience: "
+                    + ", ".join(
+                        selected_message.get(
+                            "audiences"
+                        )
+                        or []
+                    )
+                    + "  •  "
+                    + "Status: "
+                    + str(
+                        selected_message.get(
+                            "status",
+                            ""
+                        )
+                    ).title()
+                )
+
+                try:
+
+                    saved_recipients = (
+                        get_message_recipients(
+                            selected_message_id
+                        )
+                    )
+
+                except Exception as exc:
+
+                    saved_recipients = []
+
+                    st.error(
+                        "We couldn't load the saved recipient snapshot."
+                    )
+
+                    st.caption(
+                        f"DEV detail: {exc}"
+                    )
+
+                if saved_recipients:
+
+                    saved_recipient_df = (
+                        pd.DataFrame(
+                            [
+                                {
+                                    "Household ID":
+                                        recipient.get(
+                                            "household_reference",
+                                            "",
+                                        ),
+
+                                    "Contact":
+                                        recipient.get(
+                                            "contact_name",
+                                            "",
+                                        ),
+
+                                    "Phone":
+                                        recipient.get(
+                                            "phone",
+                                            "",
+                                        ),
+
+                                    "Using":
+                                        recipient.get(
+                                            "contact_source",
+                                            "",
+                                        ),
+
+                                    "Children":
+                                        recipient.get(
+                                            "children",
+                                            "",
+                                        ),
+
+                                    "Status":
+                                        str(
+                                            recipient.get(
+                                                "status",
+                                                "",
+                                            )
+                                        ).title(),
+                                }
+
+                                for recipient
+                                in saved_recipients
+                            ]
+                        )
+                    )
+
+                    st.dataframe(
+                        saved_recipient_df,
+                        hide_index=True,
+                        use_container_width=True,
+                    )
+
+                    saved_recipient_csv = (
+                        saved_recipient_df
+                        .to_csv(
+                            index=False
+                        )
+                        .encode(
+                            "utf-8-sig"
+                        )
+                    )
+
+                    st.download_button(
+                        "Download Saved Recipient Snapshot",
+                        data=saved_recipient_csv,
+                        file_name=(
+                            "ascension-message-"
+                            f"{selected_message_id}-"
+                            "recipients.csv"
+                        ),
+                        mime="text/csv",
+                        use_container_width=True,
+                        key=(
+                            "download_saved_message_"
+                            f"{selected_message_id}"
+                        ),
+                    )
+
+                if (
+                    selected_message.get(
+                        "status"
+                    )
+                    == "draft"
+                ):
+
+                    queue_col, delete_col = (
+                        st.columns(2)
+                    )
+
+                    with queue_col:
+
+                        if st.button(
+                            "Queue Selected Draft",
+                            type="primary",
+                            use_container_width=True,
+                            key=(
+                                "queue_message_draft_"
+                                f"{selected_message_id}"
+                            ),
+                        ):
+
+                            try:
+
+                                queued = (
+                                    queue_message(
+                                        selected_message_id
+                                    )
+                                )
+
+                                if queued:
+
+                                    st.success(
+                                        f"Draft #{selected_message_id} "
+                                        "is now queued for the DEV gateway. "
+                                        "Nothing has been sent yet."
+                                    )
+
+                                    st.rerun()
+
+                                else:
+
+                                    st.warning(
+                                        "That draft could not be queued."
+                                    )
+
+                            except Exception as exc:
+
+                                st.error(
+                                    "We couldn't queue this draft."
+                                )
+
+                                st.caption(
+                                    f"DEV detail: {exc}"
+                                )
+
+                    with delete_col:
+
+                        if st.button(
+                            "Delete Selected Draft",
+                            use_container_width=True,
+                            key=(
+                                "delete_message_draft_"
+                                f"{selected_message_id}"
+                            ),
+                        ):
+
+                            try:
+
+                                deleted = (
+                                    delete_message_draft(
+                                        selected_message_id
+                                    )
+                                )
+
+                                if deleted:
+
+                                    st.success(
+                                        f"Draft #{selected_message_id} deleted."
+                                    )
+
+                                    st.rerun()
+
+                                else:
+
+                                    st.warning(
+                                        "That message could not be deleted. "
+                                        "Only drafts may be removed."
+                                    )
+
+                            except Exception as exc:
+
+                                st.error(
+                                    "We couldn't delete this draft."
+                                )
+
+                                st.caption(
+                                    f"DEV detail: {exc}"
+                                )
+
+                elif (
+                    selected_message.get(
+                        "status"
+                    )
+                    == "queued"
+                ):
+
+                    st.info(
+                        "This message is locked in the DEV gateway queue. "
+                        "Queued messages are not automatically resent."
+                    )
 
     st.divider()
 

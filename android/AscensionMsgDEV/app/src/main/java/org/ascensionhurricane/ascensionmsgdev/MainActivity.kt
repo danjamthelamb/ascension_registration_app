@@ -395,6 +395,9 @@ fun MessengerScreen(
     val gatewayCallbackStatus =
         SmsStatusStore.gatewayCallbackStatus
 
+    val gatewayTerminalState =
+        SmsStatusStore.gatewayTerminalState
+
     val clearSignal =
         SmsStatusStore.clearMessageSignal
 
@@ -405,6 +408,24 @@ fun MessengerScreen(
             clearSignal > 0
         ) {
             message = ""
+        }
+    }
+
+    // Keep the screen-level queue state synchronized with the
+    // transport callback. Without this, a successful SMS can
+    // remain visually stuck in HANDED_OFF and block the next claim.
+    LaunchedEffect(
+        gatewayTerminalState
+    ) {
+        if (
+            fetchedRecipientId != null
+            && gatewayTerminalState in listOf(
+                "sent",
+                "failed",
+            )
+        ) {
+            fetchedSendState =
+                gatewayTerminalState
         }
     }
 
@@ -436,6 +457,7 @@ fun MessengerScreen(
         SmsStatusStore.sendStatus = ""
         SmsStatusStore.deliveryStatus = ""
         SmsStatusStore.gatewayCallbackStatus = ""
+        SmsStatusStore.gatewayTerminalState = ""
     }
 
 
@@ -1150,7 +1172,31 @@ fun MessengerScreen(
 
                     runOnUi {
 
+                        val callbackTerminalState =
+                            SmsStatusStore.gatewayTerminalState
+
                         if (
+                            callbackTerminalState in listOf(
+                                "sent",
+                                "failed",
+                            )
+                        ) {
+                            // A transport callback is stronger than the
+                            // earlier SUBMITTED handoff. Never downgrade a
+                            // terminal local result back to HANDED_OFF.
+                            fetchedSendState =
+                                callbackTerminalState
+
+                            gatewayStatus =
+                                if (
+                                    callbackTerminalState == "sent"
+                                ) {
+                                    "SMS send callback completed. This item is terminal and will not be resent."
+                                } else {
+                                    "Android reported a definite send failure. This item is terminal and will not be retried automatically."
+                                }
+
+                        } else if (
                             apiResult.isSuccess
                         ) {
                             fetchedSendState =
@@ -1181,14 +1227,36 @@ fun MessengerScreen(
                     exception: Exception
                 ) {
                     runOnUi {
+                        val callbackTerminalState =
+                            SmsStatusStore.gatewayTerminalState
+
                         fetchedSendState =
-                            "handed_off"
+                            if (
+                                callbackTerminalState in listOf(
+                                    "sent",
+                                    "failed",
+                                )
+                            ) {
+                                callbackTerminalState
+                            } else {
+                                "handed_off"
+                            }
 
                         gatewayStatus =
-                            "Android accepted the message, but gateway reporting failed: ${
-                                exception.message
-                                    ?: "Unknown error"
-                            }. Do not resend this item automatically."
+                            if (
+                                callbackTerminalState == "sent"
+                            ) {
+                                "SMS send callback completed. The earlier SUBMITTED report failed, but this item will not be resent."
+                            } else if (
+                                callbackTerminalState == "failed"
+                            ) {
+                                "Android reported a definite send failure. The earlier SUBMITTED report also failed."
+                            } else {
+                                "Android accepted the message, but gateway reporting failed: ${
+                                    exception.message
+                                        ?: "Unknown error"
+                                }. Do not resend this item automatically."
+                            }
                     }
                 }
 

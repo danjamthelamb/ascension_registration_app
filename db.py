@@ -3532,6 +3532,20 @@ def _update_claimed_recipient(
             "status"
         ]
 
+        # Gateway callbacks can race. For example, a fast SMS SENT
+        # callback may reach the API before the Android thread posts
+        # the earlier SUBMITTED handoff. Treat repeat updates and a
+        # late SUBMITTED after SENT as successful no-ops so a stronger
+        # terminal state is never downgraded or reported as an error.
+        if current_status == new_status:
+            return True
+
+        if (
+            current_status == "sent"
+            and new_status == "submitted"
+        ):
+            return True
+
         allowed_transitions = {
             "claimed": {
                 "submitted",

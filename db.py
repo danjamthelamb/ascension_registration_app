@@ -3429,9 +3429,9 @@ def claim_next_queued_recipient() -> dict | None:
 
             WHERE mr.status = 'queued'
               AND m.status = 'queued'
+              AND m.is_test = FALSE
 
             ORDER BY
-                m.is_test DESC,
                 m.created_at,
                 m.message_id,
                 mr.recipient_id
@@ -3625,6 +3625,85 @@ def _update_claimed_recipient(
             recipient[
                 "message_id"
             ],
+        )
+
+    return True
+
+
+def release_claimed_recipient(
+    recipient_id: int,
+    claim_token: str,
+) -> bool:
+    """
+    Return one claimed real household recipient to the queue
+    without sending it.
+
+    Safety rules:
+    - the private claim token must match;
+    - the record must be a real household message, not a DEV test;
+    - only CLAIMED may return to QUEUED;
+    - submitted, sent, failed, or cancelled records can never
+      be released through this path.
+    """
+
+    claim_token = claim_token.strip()
+
+    if not claim_token:
+        return False
+
+    with _connect() as conn:
+
+        recipient = conn.execute(
+            """
+            SELECT
+                mr.recipient_id,
+                mr.message_id,
+                mr.status,
+                m.is_test
+            FROM message_recipients AS mr
+            INNER JOIN messages AS m
+                ON m.message_id = mr.message_id
+            WHERE mr.recipient_id = %s
+              AND mr.claim_token = %s
+            FOR UPDATE OF mr;
+            """,
+            (
+                recipient_id,
+                claim_token,
+            ),
+        ).fetchone()
+
+        if (
+            recipient is None
+            or recipient["is_test"]
+            or recipient["status"] != "claimed"
+        ):
+            return False
+
+        cursor = conn.execute(
+            """
+            UPDATE message_recipients
+            SET
+                status = 'queued',
+                claimed_at = NULL,
+                claim_token = NULL,
+                error_message = NULL
+            WHERE recipient_id = %s
+              AND claim_token = %s
+              AND status = 'claimed';
+            """,
+            (
+                recipient_id,
+                claim_token,
+            ),
+        )
+
+        if cursor.rowcount != 1:
+            return False
+
+        _refresh_message_status(
+            conn,
+            recipient["message_id"],
         )
 
     return True

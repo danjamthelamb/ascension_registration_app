@@ -55,6 +55,7 @@ object GatewayApiReporter {
                 "sent",
                 "failed",
                 "cancelled",
+                "released",
             )
         ) {
             "Unsupported gateway status: $status"

@@ -395,9 +395,6 @@ fun MessengerScreen(
     val gatewayCallbackStatus =
         SmsStatusStore.gatewayCallbackStatus
 
-    val gatewayTerminalState =
-        SmsStatusStore.gatewayTerminalState
-
     val clearSignal =
         SmsStatusStore.clearMessageSignal
 
@@ -410,22 +407,6 @@ fun MessengerScreen(
             message = ""
         }
     }
-
-    LaunchedEffect(
-        gatewayTerminalState
-    ) {
-        if (
-            fetchedRecipientId != null
-            && gatewayTerminalState in listOf(
-                "sent",
-                "failed",
-            )
-        ) {
-            fetchedSendState =
-                gatewayTerminalState
-        }
-    }
-
 
     // =====================================================
     // Helpers
@@ -441,7 +422,7 @@ fun MessengerScreen(
     }
 
 
-    fun clearFetchedTest() {
+    fun clearFetchedItem() {
         fetchedRecipientId = null
         fetchedMessageId = null
         fetchedHousehold = ""
@@ -588,10 +569,14 @@ fun MessengerScreen(
 
 
     // =====================================================
-    // Fetch one DEV-only queued test
+    // Fetch one queued gateway recipient
     // =====================================================
 
-    fun fetchNextQueuedTestNow() {
+    fun fetchQueuedItemNow(
+        endpoint: String,
+        expectedTest: Boolean,
+        emptyMessage: String,
+    ) {
 
         val cleanToken =
             gatewayToken.trim()
@@ -606,15 +591,29 @@ fun MessengerScreen(
 
         if (
             fetchedRecipientId != null
-            && fetchedSendState == "claimed"
+            && fetchedSendState in listOf(
+                "claimed",
+                "cancelling",
+                "cancel_unknown",
+                "releasing",
+                "release_unknown",
+                "sending",
+                "handed_off",
+            )
         ) {
             gatewayStatus =
-                "A test is already claimed on this screen. Send or cancel it before claiming another."
+                "Finish the currently claimed item before fetching another."
             return
         }
 
         gatewayStatus =
-            "Fetching next queued DEV test..."
+            if (
+                expectedTest
+            ) {
+                "Fetching next queued DEV test..."
+            } else {
+                "Fetching next queued household..."
+            }
 
         Thread {
 
@@ -627,7 +626,7 @@ fun MessengerScreen(
 
                 val url =
                     URL(
-                        "$cleanBaseUrl/gateway/claim-next-test"
+                        "$cleanBaseUrl$endpoint"
                     )
 
                 val connection =
@@ -635,6 +634,7 @@ fun MessengerScreen(
                             as HttpURLConnection
 
                 try {
+
                     connection.requestMethod =
                         "POST"
 
@@ -712,9 +712,9 @@ fun MessengerScreen(
                         )
                     ) {
                         runOnUi {
-                            clearFetchedTest()
+                            clearFetchedItem()
                             gatewayStatus =
-                                "No queued DEV tests are waiting."
+                                emptyMessage
                         }
                         return@Thread
                     }
@@ -772,7 +772,7 @@ fun MessengerScreen(
 
                     runOnUi {
 
-                        clearFetchedTest()
+                        clearFetchedItem()
 
                         fetchedRecipientId =
                             recipientId
@@ -805,12 +805,21 @@ fun MessengerScreen(
                             "claimed"
 
                         gatewayStatus =
-                            if (
-                                isTest
-                            ) {
-                                "DEV test claimed successfully. Nothing has been sent yet."
-                            } else {
-                                "Safety stop: gateway returned a non-test item. Sending is disabled."
+                            when {
+
+                                expectedTest
+                                && isTest ->
+                                    "DEV test claimed successfully. Nothing has been sent yet."
+
+                                !expectedTest
+                                && !isTest ->
+                                    "Household claimed successfully. Nothing has been sent yet."
+
+                                isTest ->
+                                    "Safety notice: the household endpoint returned a DEV test. Review it as a test before taking any action."
+
+                                else ->
+                                    "Safety notice: the DEV test endpoint returned a real household. Review it as a household before taking any action."
                             }
                     }
 
@@ -834,6 +843,36 @@ fun MessengerScreen(
     }
 
 
+    fun fetchNextQueuedTestNow() {
+
+        fetchQueuedItemNow(
+            endpoint =
+                "/gateway/claim-next-test",
+
+            expectedTest =
+                true,
+
+            emptyMessage =
+                "No queued DEV tests are waiting.",
+        )
+    }
+
+
+    fun fetchNextQueuedHouseholdNow() {
+
+        fetchQueuedItemNow(
+            endpoint =
+                "/gateway/claim-next",
+
+            expectedTest =
+                false,
+
+            emptyMessage =
+                "No queued household messages are waiting.",
+        )
+    }
+
+
     // =====================================================
     // Cancel claimed DEV test from the owning Pixel
     // =====================================================
@@ -854,6 +893,9 @@ fun MessengerScreen(
             return
         }
 
+        fetchedSendState =
+            "cancelling"
+
         gatewayStatus =
             "Cancelling claimed DEV test..."
 
@@ -873,6 +915,7 @@ fun MessengerScreen(
                         )
 
                 runOnUi {
+
                     if (
                         apiResult.isSuccess
                     ) {
@@ -883,8 +926,11 @@ fun MessengerScreen(
                             "DEV test cancelled. It will not be sent or returned to the queue."
 
                     } else {
+                        fetchedSendState =
+                            "cancel_unknown"
+
                         gatewayStatus =
-                            "Cancel returned HTTP ${apiResult.responseCode}. Do not send until you verify the test status in Streamlit."
+                            "Cancel returned HTTP ${apiResult.responseCode}. Do not send this item until you verify its status in Streamlit."
                     }
                 }
 
@@ -892,11 +938,14 @@ fun MessengerScreen(
                 exception: Exception
             ) {
                 runOnUi {
+                    fetchedSendState =
+                        "cancel_unknown"
+
                     gatewayStatus =
                         "Cancel failed: ${
                             exception.message
                                 ?: "Unknown error"
-                        }. Do not send until you verify the test status in Streamlit."
+                        }. Do not send this item until you verify its status in Streamlit."
                 }
             }
 
@@ -905,10 +954,89 @@ fun MessengerScreen(
 
 
     // =====================================================
-    // Send the currently claimed DEV test
+    // Release a claimed real household without sending
     // =====================================================
 
-    fun sendFetchedTestNow() {
+    fun releaseFetchedHouseholdNow() {
+
+        val recipientId =
+            fetchedRecipientId
+
+        if (
+            recipientId == null
+            || fetchedClaimToken.isBlank()
+            || fetchedIsTest
+            || fetchedSendState != "claimed"
+        ) {
+            gatewayStatus =
+                "There is no active claimed household to release."
+            return
+        }
+
+        fetchedSendState =
+            "releasing"
+
+        gatewayStatus =
+            "Releasing household back to the queue..."
+
+        Thread {
+
+            try {
+
+                val apiResult =
+                    GatewayApiReporter
+                        .postRecipientStatus(
+                            gatewayUrl = gatewayUrl,
+                            gatewayToken = gatewayToken,
+                            recipientId = recipientId,
+                            claimToken = fetchedClaimToken,
+                            status = "released",
+                            transport = "android_manual",
+                        )
+
+                runOnUi {
+
+                    if (
+                        apiResult.isSuccess
+                    ) {
+                        clearFetchedItem()
+
+                        gatewayStatus =
+                            "Household released without sending. It is queued again and may be claimed later."
+
+                    } else {
+                        fetchedSendState =
+                            "release_unknown"
+
+                        gatewayStatus =
+                            "Release returned HTTP ${apiResult.responseCode}. Do not send this item until you verify its status in Streamlit."
+                    }
+                }
+
+            } catch (
+                exception: Exception
+            ) {
+                runOnUi {
+                    fetchedSendState =
+                        "release_unknown"
+
+                    gatewayStatus =
+                        "Release failed: ${
+                            exception.message
+                                ?: "Unknown error"
+                        }. Do not send this item until you verify its status in Streamlit."
+                }
+            }
+
+        }.start()
+    }
+
+
+    // =====================================================
+    // Send the currently claimed gateway item
+    // =====================================================
+
+    fun sendFetchedClaimNow() {
 
         val recipientId =
             fetchedRecipientId
@@ -932,7 +1060,6 @@ fun MessengerScreen(
 
         if (
             recipientId == null
-            || !fetchedIsTest
             || fetchedSendState != "claimed"
             || cleanPhone.isBlank()
             || cleanMessage.isBlank()
@@ -941,9 +1068,23 @@ fun MessengerScreen(
             || cleanGatewayUrl.isBlank()
         ) {
             gatewayStatus =
-                "This DEV test is not in a safe claimed state for sending."
+                "This message is not in a safe claimed state for sending."
             return
         }
+
+        val itemLabel =
+            if (
+                fetchedIsTest
+            ) {
+                "DEV test"
+            } else {
+                "household message"
+            }
+
+        // Disable release/cancel immediately while Android is
+        // attempting the handoff.
+        fetchedSendState =
+            "sending"
 
         try {
 
@@ -980,9 +1121,9 @@ fun MessengerScreen(
             )
 
             // Important safety rule: once SmsManager accepts the call,
-            // this item is no longer eligible for manual resend even if
-            // the API status report below fails. RCS may take over and
-            // never return the normal SMS sent PendingIntent.
+            // this item is no longer eligible for manual resend or release,
+            // even if the API status report below fails. RCS may take over
+            // and never return the normal SMS sent PendingIntent.
             fetchedSendState =
                 "handed_off"
 
@@ -990,7 +1131,7 @@ fun MessengerScreen(
                 "Android accepted the send request. Waiting for gateway status report..."
 
             gatewayStatus =
-                "Android accepted the send request. This test will not be automatically retried."
+                "Android accepted the $itemLabel. It will not be automatically retried."
 
             Thread {
 
@@ -1016,7 +1157,7 @@ fun MessengerScreen(
                                 "submitted"
 
                             gatewayStatus =
-                                "Gateway recorded SUBMITTED. If normal SMS callbacks arrive, it will upgrade to SENT. If RCS takes over, SUBMITTED remains terminal and will never auto-retry."
+                                "Gateway recorded SUBMITTED. If normal SMS callbacks arrive, it may upgrade to SENT. If RCS takes over, SUBMITTED remains terminal and will never auto-retry."
 
                         } else if (
                             apiResult.responseCode == 409
@@ -1032,7 +1173,7 @@ fun MessengerScreen(
                                 "handed_off"
 
                             gatewayStatus =
-                                "Android accepted the message, but the gateway status report returned HTTP ${apiResult.responseCode}. Do not resend this test automatically."
+                                "Android accepted the message, but the gateway status report returned HTTP ${apiResult.responseCode}. Do not resend this item automatically."
                         }
                     }
 
@@ -1047,7 +1188,7 @@ fun MessengerScreen(
                             "Android accepted the message, but gateway reporting failed: ${
                                 exception.message
                                     ?: "Unknown error"
-                            }. Do not resend this test automatically."
+                            }. Do not resend this item automatically."
                     }
                 }
 
@@ -1265,11 +1406,17 @@ fun MessengerScreen(
                 "test" ->
                     testGatewayNow()
 
-                "fetch" ->
+                "fetch_test" ->
                     fetchNextQueuedTestNow()
 
-                "cancel" ->
+                "fetch_household" ->
+                    fetchNextQueuedHouseholdNow()
+
+                "cancel_test" ->
                     cancelFetchedTestNow()
+
+                "release_household" ->
+                    releaseFetchedHouseholdNow()
             }
         }
 
@@ -1325,8 +1472,8 @@ fun MessengerScreen(
             when (
                 action
             ) {
-                "gateway_test" ->
-                    sendFetchedTestNow()
+                "gateway_claim" ->
+                    sendFetchedClaimNow()
 
                 "manual" ->
                     sendManualMessageNow()
@@ -1485,56 +1632,147 @@ fun MessengerScreen(
                 )
         )
 
-        Row(
+        Button(
+            onClick = {
+                requireLocalNetworkThen(
+                    action = "test",
+                    block = {
+                        testGatewayNow()
+                    },
+                )
+            },
             modifier =
-                Modifier.fillMaxWidth(),
-            horizontalArrangement =
-                Arrangement.spacedBy(
-                    12.dp
-                )
+                Modifier.fillMaxWidth()
         ) {
+            Text(
+                "Test Gateway"
+            )
+        }
 
-            Button(
-                onClick = {
-                    requireLocalNetworkThen(
-                        action = "test",
-                        block = {
-                            testGatewayNow()
-                        },
-                    )
-                },
-                modifier =
-                    Modifier.weight(
-                        1f
-                    )
-            ) {
-                Text(
-                    "Test Gateway"
+        Spacer(
+            modifier =
+                Modifier.height(
+                    18.dp
                 )
-            }
+        )
 
-            Button(
-                onClick = {
-                    requireLocalNetworkThen(
-                        action = "fetch",
-                        block = {
-                            fetchNextQueuedTestNow()
-                        },
-                    )
-                },
-                enabled = !(
-                        fetchedRecipientId != null
-                                && fetchedSendState == "claimed"
-                        ),
-                modifier =
-                    Modifier.weight(
-                        1f
-                    )
-            ) {
-                Text(
-                    "Fetch Next TEST"
+        Text(
+            text =
+                "DEV Test Queue",
+            style =
+                MaterialTheme
+                    .typography
+                    .titleMedium,
+            fontWeight =
+                FontWeight.Bold
+        )
+
+        Text(
+            text =
+                "Manual one-number test messages only.",
+            style =
+                MaterialTheme
+                    .typography
+                    .bodySmall
+        )
+
+        Spacer(
+            modifier =
+                Modifier.height(
+                    8.dp
                 )
-            }
+        )
+
+        Button(
+            onClick = {
+                requireLocalNetworkThen(
+                    action = "fetch_test",
+                    block = {
+                        fetchNextQueuedTestNow()
+                    },
+                )
+            },
+            enabled = !(
+                fetchedRecipientId != null
+                && fetchedSendState in listOf(
+                    "claimed",
+                    "cancelling",
+                    "cancel_unknown",
+                    "releasing",
+                    "release_unknown",
+                    "sending",
+                    "handed_off",
+                )
+            ),
+            modifier =
+                Modifier.fillMaxWidth()
+        ) {
+            Text(
+                "Fetch Next TEST"
+            )
+        }
+
+        Spacer(
+            modifier =
+                Modifier.height(
+                    18.dp
+                )
+        )
+
+        Text(
+            text =
+                "Household Queue",
+            style =
+                MaterialTheme
+                    .typography
+                    .titleMedium,
+            fontWeight =
+                FontWeight.Bold
+        )
+
+        Text(
+            text =
+                "Claims one real queued household at a time. Nothing sends until you approve it.",
+            style =
+                MaterialTheme
+                    .typography
+                    .bodySmall
+        )
+
+        Spacer(
+            modifier =
+                Modifier.height(
+                    8.dp
+                )
+        )
+
+        Button(
+            onClick = {
+                requireLocalNetworkThen(
+                    action = "fetch_household",
+                    block = {
+                        fetchNextQueuedHouseholdNow()
+                    },
+                )
+            },
+            enabled = !(
+                fetchedRecipientId != null
+                && fetchedSendState in listOf(
+                    "claimed",
+                    "cancelling",
+                    "cancel_unknown",
+                    "releasing",
+                    "release_unknown",
+                    "sending",
+                    "handed_off",
+                )
+            ),
+            modifier =
+                Modifier.fillMaxWidth()
+        ) {
+            Text(
+                "Fetch Next Household"
+            )
         }
 
         if (
@@ -1559,7 +1797,7 @@ fun MessengerScreen(
 
 
         // -------------------------------------------------
-        // Claimed test
+        // Claimed gateway item
         // -------------------------------------------------
 
         if (
@@ -1589,7 +1827,7 @@ fun MessengerScreen(
                     ) {
                         "TEST MESSAGE"
                     } else {
-                        "SAFETY STOP - NON-TEST ITEM"
+                        "HOUSEHOLD MESSAGE"
                     },
                 style =
                     MaterialTheme
@@ -1626,7 +1864,13 @@ fun MessengerScreen(
             ) {
                 Text(
                     text =
-                        "Reference: $fetchedHousehold"
+                        if (
+                            fetchedIsTest
+                        ) {
+                            "Reference: $fetchedHousehold"
+                        } else {
+                            "Household: $fetchedHousehold"
+                        }
                 )
             }
 
@@ -1635,7 +1879,13 @@ fun MessengerScreen(
             ) {
                 Text(
                     text =
-                        "Source: $fetchedChildren"
+                        if (
+                            fetchedIsTest
+                        ) {
+                            "Source: $fetchedChildren"
+                        } else {
+                            "Children: $fetchedChildren"
+                        }
                 )
             }
 
@@ -1674,13 +1924,18 @@ fun MessengerScreen(
             )
 
             if (
-                fetchedIsTest
-                && fetchedSendState == "claimed"
+                fetchedSendState == "claimed"
             ) {
 
                 Text(
                     text =
-                        "Nothing has been sent yet. Review the number and message before continuing.",
+                        if (
+                            fetchedIsTest
+                        ) {
+                            "Nothing has been sent yet. Review the number and message before continuing."
+                        } else {
+                            "Nothing has been sent yet. Review the household, recipient number, children, and exact message before continuing."
+                        },
                     style =
                         MaterialTheme
                             .typography
@@ -1697,9 +1952,9 @@ fun MessengerScreen(
                 Button(
                     onClick = {
                         requireSmsThen(
-                            action = "gateway_test",
+                            action = "gateway_claim",
                             block = {
-                                sendFetchedTestNow()
+                                sendFetchedClaimNow()
                             },
                         )
                     },
@@ -1707,7 +1962,13 @@ fun MessengerScreen(
                         Modifier.fillMaxWidth()
                 ) {
                     Text(
-                        "Send This TEST"
+                        if (
+                            fetchedIsTest
+                        ) {
+                            "Send This TEST"
+                        } else {
+                            "Send This Message"
+                        }
                     )
                 }
 
@@ -1718,22 +1979,89 @@ fun MessengerScreen(
                         )
                 )
 
-                Button(
-                    onClick = {
-                        requireLocalNetworkThen(
-                            action = "cancel",
-                            block = {
-                                cancelFetchedTestNow()
-                            },
-                        )
-                    },
-                    modifier =
-                        Modifier.fillMaxWidth()
+                if (
+                    fetchedIsTest
                 ) {
+
+                    Button(
+                        onClick = {
+                            requireLocalNetworkThen(
+                                action = "cancel_test",
+                                block = {
+                                    cancelFetchedTestNow()
+                                },
+                            )
+                        },
+                        modifier =
+                            Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "Cancel This Claimed TEST"
+                        )
+                    }
+
+                } else {
+
+                    Button(
+                        onClick = {
+                            requireLocalNetworkThen(
+                                action = "release_household",
+                                block = {
+                                    releaseFetchedHouseholdNow()
+                                },
+                            )
+                        },
+                        modifier =
+                            Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "Release Without Sending"
+                        )
+                    }
+
+                    Spacer(
+                        modifier =
+                            Modifier.height(
+                                8.dp
+                            )
+                    )
+
                     Text(
-                        "Cancel This Claimed TEST"
+                        text =
+                            "Release returns this household to the queue. It does not mark the message sent and it does not skip the household permanently.",
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodySmall
                     )
                 }
+            }
+
+            if (
+                fetchedSendState in listOf(
+                    "cancel_unknown",
+                    "release_unknown",
+                    "handed_off",
+                )
+            ) {
+
+                Spacer(
+                    modifier =
+                        Modifier.height(
+                            12.dp
+                        )
+                )
+
+                Text(
+                    text =
+                        "Safety lock: do not resend or release this item until its database status is verified in Streamlit.",
+                    style =
+                        MaterialTheme
+                            .typography
+                            .bodySmall,
+                    fontWeight =
+                        FontWeight.Bold
+                )
             }
 
             if (

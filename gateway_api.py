@@ -11,6 +11,7 @@ from db import (
     claim_next_queued_recipient,
     claim_next_queued_test_recipient,
     cancel_claimed_test_recipient,
+    release_claimed_recipient,
     get_gateway_queue_summary,
     mark_recipient_failed,
     mark_recipient_sent,
@@ -157,6 +158,41 @@ def claim_next() -> dict:
     return {
         "recipient":
             claim_next_queued_recipient(),
+    }
+
+
+@app.post(
+    "/gateway/recipients/{recipient_id}/released",
+    dependencies=[
+        Depends(
+            require_gateway_token
+        )
+    ],
+)
+def recipient_released(
+    recipient_id: int,
+    update: RecipientUpdate,
+) -> dict:
+
+    updated = (
+        release_claimed_recipient(
+            recipient_id,
+            update.claim_token,
+        )
+    )
+
+    if not updated:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Recipient is not a claimed real household message "
+                "owned by this claim token."
+            ),
+        )
+
+    return {
+        "ok": True,
+        "status": "queued",
     }
 
 

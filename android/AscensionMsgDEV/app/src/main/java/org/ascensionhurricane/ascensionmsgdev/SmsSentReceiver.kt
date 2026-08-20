@@ -198,7 +198,7 @@ class SmsSentReceiver : BroadcastReceiver() {
                         if (
                             status == "sent"
                         ) {
-                            "Gateway upgraded this test to SENT."
+                            "Gateway upgraded this message to SENT."
                         } else {
                             "Gateway recorded the definite send failure."
                         }

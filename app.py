@@ -7514,7 +7514,10 @@ if (
 
                     st.info(
                         "This message is locked in the DEV gateway queue. "
-                        "Queued messages are not automatically resent."
+                        "The Pixel claims one household at a time. A claimed "
+                        "household may be released back to the queue before "
+                        "sending, and submitted messages are never "
+                        "automatically retried."
                     )
 
     st.divider()

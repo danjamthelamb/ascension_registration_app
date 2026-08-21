@@ -9,10 +9,13 @@ import streamlit as st
 
 from db import (
     claim_next_queued_recipient,
+    claim_next_queued_recipient_for_message,
     claim_next_queued_test_recipient,
     cancel_claimed_test_recipient,
     release_claimed_recipient,
     get_gateway_queue_summary,
+    get_gateway_message_summary,
+    get_gateway_recipient_status,
     mark_recipient_failed,
     mark_recipient_sent,
     mark_recipient_submitted,
@@ -111,6 +114,10 @@ class RecipientFailure(RecipientUpdate):
     error_message: str
 
 
+class RecipientLookup(BaseModel):
+    claim_token: str
+
+
 @app.get("/health")
 def health() -> dict:
     return {
@@ -158,6 +165,83 @@ def claim_next() -> dict:
     return {
         "recipient":
             claim_next_queued_recipient(),
+    }
+
+
+@app.post(
+    "/gateway/messages/{message_id}/claim-next",
+    dependencies=[
+        Depends(
+            require_gateway_token
+        )
+    ],
+)
+def claim_next_for_message(
+    message_id: int,
+) -> dict:
+    return {
+        "recipient":
+            claim_next_queued_recipient_for_message(
+                message_id
+            ),
+    }
+
+
+@app.get(
+    "/gateway/messages/{message_id}/summary",
+    dependencies=[
+        Depends(
+            require_gateway_token
+        )
+    ],
+)
+def message_summary(
+    message_id: int,
+) -> dict:
+
+    summary = get_gateway_message_summary(
+        message_id
+    )
+
+    if summary is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Real household message not found.",
+        )
+
+    return {
+        "message": summary,
+    }
+
+
+@app.post(
+    "/gateway/recipients/{recipient_id}/status",
+    dependencies=[
+        Depends(
+            require_gateway_token
+        )
+    ],
+)
+def recipient_status(
+    recipient_id: int,
+    lookup: RecipientLookup,
+) -> dict:
+
+    recipient = get_gateway_recipient_status(
+        recipient_id,
+        lookup.claim_token,
+    )
+
+    if recipient is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "Recipient was not found for this claim token."
+            ),
+        )
+
+    return {
+        "recipient": recipient,
     }
 
 

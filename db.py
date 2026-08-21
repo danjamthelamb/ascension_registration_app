@@ -3481,6 +3481,193 @@ def claim_next_queued_recipient() -> dict | None:
         return result
 
 
+
+def claim_next_queued_recipient_for_message(
+    message_id: int,
+) -> dict | None:
+    """
+    Atomically reserve the next queued REAL household recipient
+    for one specific message.
+
+    This is the batch-safe claim path. It can never cross into a
+    different queued message and it can never claim DEV tests.
+    """
+
+    claim_token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+
+    with _connect() as conn:
+
+        row = conn.execute(
+            """
+            SELECT
+                mr.recipient_id,
+                mr.message_id,
+                mr.household_reference,
+                mr.contact_name,
+                mr.phone,
+                mr.contact_source,
+                mr.children,
+                m.message_text,
+                m.audiences,
+                m.is_test
+            FROM message_recipients AS mr
+            INNER JOIN messages AS m
+                ON m.message_id = mr.message_id
+            WHERE mr.status = 'queued'
+              AND mr.message_id = %s
+              AND m.message_id = %s
+              AND m.status = 'queued'
+              AND m.is_test = FALSE
+            ORDER BY mr.recipient_id
+            FOR UPDATE OF mr
+            SKIP LOCKED
+            LIMIT 1;
+            """,
+            (
+                message_id,
+                message_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        recipient_id = row["recipient_id"]
+
+        cursor = conn.execute(
+            """
+            UPDATE message_recipients
+            SET
+                status = 'claimed',
+                claimed_at = %s,
+                claim_token = %s
+            WHERE recipient_id = %s
+              AND status = 'queued';
+            """,
+            (
+                now,
+                claim_token,
+                recipient_id,
+            ),
+        )
+
+        if cursor.rowcount != 1:
+            return None
+
+        result = dict(row)
+        result["claim_token"] = claim_token
+        result["claimed_at"] = now
+        return result
+
+
+def get_gateway_recipient_status(
+    recipient_id: int,
+    claim_token: str,
+) -> dict | None:
+    """
+    Return the current gateway state for a recipient owned by the
+    supplied claim token.
+
+    Batch mode uses this after Android handoff so it can observe a
+    fast SMS SENT/FAILED callback before advancing. The claim token
+    remains required even after SUBMITTED/SENT/FAILED so another
+    device cannot inspect or control the item merely by guessing an ID.
+    """
+
+    claim_token = claim_token.strip()
+
+    if not claim_token:
+        return None
+
+    with _connect() as conn:
+
+        row = conn.execute(
+            """
+            SELECT
+                mr.recipient_id,
+                mr.message_id,
+                mr.status,
+                mr.submitted_at,
+                mr.sent_at,
+                mr.transport,
+                mr.error_message,
+                m.is_test
+            FROM message_recipients AS mr
+            INNER JOIN messages AS m
+                ON m.message_id = mr.message_id
+            WHERE mr.recipient_id = %s
+              AND mr.claim_token = %s;
+            """,
+            (
+                recipient_id,
+                claim_token,
+            ),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    return dict(row)
+
+
+def get_gateway_message_summary(
+    message_id: int,
+) -> dict | None:
+    """
+    Return safe batch progress counts for one real household message.
+    """
+
+    with _connect() as conn:
+
+        row = conn.execute(
+            """
+            SELECT
+                m.message_id,
+                m.status,
+                m.audiences,
+                m.is_test,
+                COUNT(mr.recipient_id) AS total,
+                COUNT(*) FILTER (
+                    WHERE mr.status = 'draft'
+                ) AS draft,
+                COUNT(*) FILTER (
+                    WHERE mr.status = 'queued'
+                ) AS queued,
+                COUNT(*) FILTER (
+                    WHERE mr.status = 'claimed'
+                ) AS claimed,
+                COUNT(*) FILTER (
+                    WHERE mr.status = 'submitted'
+                ) AS submitted,
+                COUNT(*) FILTER (
+                    WHERE mr.status = 'sent'
+                ) AS sent,
+                COUNT(*) FILTER (
+                    WHERE mr.status = 'failed'
+                ) AS failed,
+                COUNT(*) FILTER (
+                    WHERE mr.status = 'cancelled'
+                ) AS cancelled
+            FROM messages AS m
+            LEFT JOIN message_recipients AS mr
+                ON mr.message_id = m.message_id
+            WHERE m.message_id = %s
+              AND m.is_test = FALSE
+            GROUP BY
+                m.message_id,
+                m.status,
+                m.audiences,
+                m.is_test;
+            """,
+            (message_id,),
+        ).fetchone()
+
+    if row is None:
+        return None
+
+    return dict(row)
+
 def _update_claimed_recipient(
     recipient_id: int,
     claim_token: str,

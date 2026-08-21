@@ -37,6 +37,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -51,6 +52,8 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.UUID
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.atomic.AtomicBoolean
 
 
 const val EXTRA_SEND_ID =
@@ -80,6 +83,38 @@ data class SmsPartAggregate(
     val allPartsReceived: Boolean,
     val allSuccessful: Boolean,
 )
+
+
+data class GatewayClaimedItem(
+    val recipientId: Long,
+    val messageId: Long,
+    val householdReference: String,
+    val contactName: String,
+    val phone: String,
+    val children: String,
+    val messageText: String,
+    val claimToken: String,
+    val isTest: Boolean,
+)
+
+
+data class GatewayMessageSummary(
+    val messageId: Long,
+    val messageStatus: String,
+    val total: Int,
+    val queued: Int,
+    val claimed: Int,
+    val submitted: Int,
+    val sent: Int,
+    val failed: Int,
+    val cancelled: Int,
+) {
+    val processed: Int
+        get() = submitted + sent + failed + cancelled
+
+    val remaining: Int
+        get() = queued + claimed
+}
 
 
 object SmsStatusStore {
@@ -375,6 +410,55 @@ fun MessengerScreen(
 
 
     // =====================================================
+    // Controlled household batch
+    // =====================================================
+
+    var batchRunning by rememberSaveable {
+        mutableStateOf(false)
+    }
+
+    var batchStopRequested by rememberSaveable {
+        mutableStateOf(false)
+    }
+
+    var batchMessageId by rememberSaveable {
+        mutableStateOf<Long?>(null)
+    }
+
+    var batchStatus by rememberSaveable {
+        mutableStateOf("")
+    }
+
+    var batchTotal by rememberSaveable {
+        mutableIntStateOf(0)
+    }
+
+    var batchQueued by rememberSaveable {
+        mutableIntStateOf(0)
+    }
+
+    var batchClaimed by rememberSaveable {
+        mutableIntStateOf(0)
+    }
+
+    var batchSubmitted by rememberSaveable {
+        mutableIntStateOf(0)
+    }
+
+    var batchSent by rememberSaveable {
+        mutableIntStateOf(0)
+    }
+
+    var batchFailed by rememberSaveable {
+        mutableIntStateOf(0)
+    }
+
+    val batchStopSignal = remember {
+        AtomicBoolean(false)
+    }
+
+
+    // =====================================================
     // Existing manual SMS diagnostics
     // =====================================================
 
@@ -418,7 +502,8 @@ fun MessengerScreen(
         gatewayTerminalState
     ) {
         if (
-            fetchedRecipientId != null
+            !batchRunning
+            && fetchedRecipientId != null
             && gatewayTerminalState in listOf(
                 "sent",
                 "failed",
@@ -458,6 +543,986 @@ fun MessengerScreen(
         SmsStatusStore.deliveryStatus = ""
         SmsStatusStore.gatewayCallbackStatus = ""
         SmsStatusStore.gatewayTerminalState = ""
+    }
+
+
+
+    fun applyFetchedItem(
+        item: GatewayClaimedItem,
+    ) {
+        fetchedRecipientId =
+            item.recipientId
+        fetchedMessageId =
+            item.messageId
+        fetchedHousehold =
+            item.householdReference
+        fetchedContact =
+            item.contactName
+        fetchedPhone =
+            item.phone
+        fetchedChildren =
+            item.children
+        fetchedMessage =
+            item.messageText
+        fetchedClaimToken =
+            item.claimToken
+        fetchedIsTest =
+            item.isTest
+        fetchedSendState =
+            "claimed"
+    }
+
+
+    fun currentFetchedItem(): GatewayClaimedItem? {
+
+        val recipientId =
+            fetchedRecipientId
+                ?: return null
+
+        val messageId =
+            fetchedMessageId
+                ?: return null
+
+        return GatewayClaimedItem(
+            recipientId = recipientId,
+            messageId = messageId,
+            householdReference = fetchedHousehold,
+            contactName = fetchedContact,
+            phone = fetchedPhone,
+            children = fetchedChildren,
+            messageText = fetchedMessage,
+            claimToken = fetchedClaimToken,
+            isTest = fetchedIsTest,
+        )
+    }
+
+
+    fun updateBatchSummary(
+        summary: GatewayMessageSummary,
+    ) {
+        batchMessageId =
+            summary.messageId
+        batchTotal =
+            summary.total
+        batchQueued =
+            summary.queued
+        batchClaimed =
+            summary.claimed
+        batchSubmitted =
+            summary.submitted
+        batchSent =
+            summary.sent
+        batchFailed =
+            summary.failed
+    }
+
+
+    fun parseClaimedItem(
+        recipient: JSONObject,
+    ): GatewayClaimedItem {
+
+        return GatewayClaimedItem(
+            recipientId =
+                recipient.getLong(
+                    "recipient_id"
+                ),
+            messageId =
+                recipient.getLong(
+                    "message_id"
+                ),
+            householdReference =
+                recipient.optString(
+                    "household_reference"
+                ),
+            contactName =
+                recipient.optString(
+                    "contact_name"
+                ),
+            phone =
+                recipient.optString(
+                    "phone"
+                ),
+            children =
+                recipient.optString(
+                    "children"
+                ),
+            messageText =
+                recipient.optString(
+                    "message_text"
+                ),
+            claimToken =
+                recipient.optString(
+                    "claim_token"
+                ),
+            isTest =
+                recipient.optBoolean(
+                    "is_test",
+                    false,
+                ),
+        )
+    }
+
+
+    fun claimNextForMessageBlocking(
+        messageId: Long,
+    ): GatewayClaimedItem? {
+
+        val cleanBaseUrl =
+            gatewayUrl
+                .trim()
+                .trimEnd('/')
+
+        val cleanToken =
+            gatewayToken.trim()
+
+        val url =
+            URL(
+                "$cleanBaseUrl/gateway/messages/$messageId/claim-next"
+            )
+
+        val connection =
+            url.openConnection()
+                    as HttpURLConnection
+
+        try {
+            connection.requestMethod =
+                "POST"
+
+            connection.setRequestProperty(
+                "Authorization",
+                "Bearer $cleanToken",
+            )
+
+            connection.setRequestProperty(
+                "Content-Type",
+                "application/json",
+            )
+
+            connection.connectTimeout =
+                5000
+
+            connection.readTimeout =
+                5000
+
+            connection.doOutput =
+                true
+
+            connection
+                .outputStream
+                .use {
+                    it.write(
+                        "{}"
+                            .toByteArray(
+                                Charsets.UTF_8
+                            )
+                    )
+                }
+
+            val responseCode =
+                connection.responseCode
+
+            val responseBody =
+                if (
+                    responseCode in 200..299
+                ) {
+                    connection
+                        .inputStream
+                        .bufferedReader()
+                        .use {
+                            it.readText()
+                        }
+                } else {
+                    connection
+                        .errorStream
+                        ?.bufferedReader()
+                        ?.use {
+                            it.readText()
+                        }
+                        ?: ""
+                }
+
+            if (
+                responseCode !in 200..299
+            ) {
+                throw IllegalStateException(
+                    "Same-message claim returned HTTP $responseCode."
+                )
+            }
+
+            val root =
+                JSONObject(
+                    responseBody
+                )
+
+            if (
+                root.isNull(
+                    "recipient"
+                )
+            ) {
+                return null
+            }
+
+            return parseClaimedItem(
+                root.getJSONObject(
+                    "recipient"
+                )
+            )
+
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+
+    fun fetchRecipientStatusBlocking(
+        item: GatewayClaimedItem,
+    ): String? {
+
+        val cleanBaseUrl =
+            gatewayUrl
+                .trim()
+                .trimEnd('/')
+
+        val cleanToken =
+            gatewayToken.trim()
+
+        val url =
+            URL(
+                "$cleanBaseUrl/gateway/recipients/${item.recipientId}/status"
+            )
+
+        val connection =
+            url.openConnection()
+                    as HttpURLConnection
+
+        try {
+            connection.requestMethod =
+                "POST"
+
+            connection.setRequestProperty(
+                "Authorization",
+                "Bearer $cleanToken",
+            )
+
+            connection.setRequestProperty(
+                "Content-Type",
+                "application/json",
+            )
+
+            connection.connectTimeout =
+                3500
+
+            connection.readTimeout =
+                3500
+
+            connection.doOutput =
+                true
+
+            val body =
+                JSONObject()
+                    .put(
+                        "claim_token",
+                        item.claimToken,
+                    )
+
+            connection
+                .outputStream
+                .use {
+                    it.write(
+                        body
+                            .toString()
+                            .toByteArray(
+                                Charsets.UTF_8
+                            )
+                    )
+                }
+
+            val responseCode =
+                connection.responseCode
+
+            if (
+                responseCode !in 200..299
+            ) {
+                return null
+            }
+
+            val responseBody =
+                connection
+                    .inputStream
+                    .bufferedReader()
+                    .use {
+                        it.readText()
+                    }
+
+            val root =
+                JSONObject(
+                    responseBody
+                )
+
+            return root
+                .getJSONObject(
+                    "recipient"
+                )
+                .optString(
+                    "status"
+                )
+                .ifBlank {
+                    null
+                }
+
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+
+    fun fetchMessageSummaryBlocking(
+        messageId: Long,
+    ): GatewayMessageSummary? {
+
+        val cleanBaseUrl =
+            gatewayUrl
+                .trim()
+                .trimEnd('/')
+
+        val cleanToken =
+            gatewayToken.trim()
+
+        val url =
+            URL(
+                "$cleanBaseUrl/gateway/messages/$messageId/summary"
+            )
+
+        val connection =
+            url.openConnection()
+                    as HttpURLConnection
+
+        try {
+            connection.requestMethod =
+                "GET"
+
+            connection.setRequestProperty(
+                "Authorization",
+                "Bearer $cleanToken",
+            )
+
+            connection.connectTimeout =
+                3500
+
+            connection.readTimeout =
+                3500
+
+            val responseCode =
+                connection.responseCode
+
+            if (
+                responseCode !in 200..299
+            ) {
+                return null
+            }
+
+            val responseBody =
+                connection
+                    .inputStream
+                    .bufferedReader()
+                    .use {
+                        it.readText()
+                    }
+
+            val messageJson =
+                JSONObject(
+                    responseBody
+                )
+                    .getJSONObject(
+                        "message"
+                    )
+
+            return GatewayMessageSummary(
+                messageId =
+                    messageJson.getLong(
+                        "message_id"
+                    ),
+                messageStatus =
+                    messageJson.optString(
+                        "status"
+                    ),
+                total =
+                    messageJson.optInt(
+                        "total",
+                        0,
+                    ),
+                queued =
+                    messageJson.optInt(
+                        "queued",
+                        0,
+                    ),
+                claimed =
+                    messageJson.optInt(
+                        "claimed",
+                        0,
+                    ),
+                submitted =
+                    messageJson.optInt(
+                        "submitted",
+                        0,
+                    ),
+                sent =
+                    messageJson.optInt(
+                        "sent",
+                        0,
+                    ),
+                failed =
+                    messageJson.optInt(
+                        "failed",
+                        0,
+                    ),
+                cancelled =
+                    messageJson.optInt(
+                        "cancelled",
+                        0,
+                    ),
+            )
+
+        } finally {
+            connection.disconnect()
+        }
+    }
+
+
+    data class SmsHandoffResult(
+        val sendId: String?,
+        val error: String?,
+    )
+
+
+    fun handoffBatchSmsBlocking(
+        item: GatewayClaimedItem,
+    ): SmsHandoffResult {
+
+        val latch =
+            CountDownLatch(1)
+
+        var result =
+            SmsHandoffResult(
+                sendId = null,
+                error = "SMS handoff did not run.",
+            )
+
+        (context as Activity)
+            .runOnUiThread {
+
+                try {
+                    val smsManager =
+                        getSmsManager(
+                            context
+                        )
+
+                    val messageParts =
+                        smsManager.divideMessage(
+                            item.messageText
+                        )
+
+                    val sendId =
+                        UUID
+                            .randomUUID()
+                            .toString()
+
+                    SmsStatusStore.beginSend(
+                        sendId = sendId,
+                        partCount = messageParts.size,
+                    )
+
+                    sendSms(
+                        context = context,
+                        smsManager = smsManager,
+                        phoneNumber = item.phone,
+                        messageParts = messageParts,
+                        sendId = sendId,
+                        gatewayRecipientId = item.recipientId,
+                        gatewayClaimToken = item.claimToken,
+                        gatewayUrl = gatewayUrl.trim().trimEnd('/'),
+                        gatewayToken = gatewayToken.trim(),
+                    )
+
+                    result =
+                        SmsHandoffResult(
+                            sendId = sendId,
+                            error = null,
+                        )
+
+                } catch (
+                    exception: Exception
+                ) {
+                    result =
+                        SmsHandoffResult(
+                            sendId = null,
+                            error =
+                                exception.message
+                                    ?: "Unknown Android send failure",
+                        )
+
+                } finally {
+                    latch.countDown()
+                }
+            }
+
+        latch.await()
+
+        return result
+    }
+
+
+    fun startHouseholdBatchNow() {
+
+        val firstItem =
+            currentFetchedItem()
+                ?: run {
+                    gatewayStatus =
+                        "Fetch and review one claimed household before starting a batch."
+                    return
+                }
+
+        if (
+            firstItem.isTest
+            || fetchedSendState != "claimed"
+            || firstItem.phone.isBlank()
+            || firstItem.messageText.isBlank()
+            || firstItem.claimToken.isBlank()
+        ) {
+            gatewayStatus =
+                "Fetch and review one claimed household before starting a batch."
+            return
+        }
+
+        if (
+            gatewayToken.isBlank()
+            || gatewayUrl.isBlank()
+        ) {
+            gatewayStatus =
+                "Gateway URL and token are required before starting a batch."
+            return
+        }
+
+        val targetMessageId =
+            firstItem.messageId
+
+        batchStopSignal.set(
+            false
+        )
+
+        batchStopRequested =
+            false
+
+        batchRunning =
+            true
+
+        batchMessageId =
+            targetMessageId
+
+        batchStatus =
+            "Starting Message #$targetMessageId batch..."
+
+        Thread {
+
+            var currentItem =
+                firstItem
+
+            try {
+
+                fetchMessageSummaryBlocking(
+                    targetMessageId
+                )?.let { summary ->
+                    runOnUi {
+                        updateBatchSummary(
+                            summary
+                        )
+                    }
+                }
+
+                while (
+                    true
+                ) {
+
+                    runOnUi {
+                        applyFetchedItem(
+                            currentItem
+                        )
+
+                        fetchedSendState =
+                            "sending"
+
+                        batchStatus =
+                            "Sending ${currentItem.contactName}..."
+                    }
+
+                    val handoff =
+                        handoffBatchSmsBlocking(
+                            currentItem
+                        )
+
+                    if (
+                        handoff.error != null
+                    ) {
+                        val failedResult =
+                            try {
+                                GatewayApiReporter
+                                    .postRecipientStatus(
+                                        gatewayUrl = gatewayUrl,
+                                        gatewayToken = gatewayToken,
+                                        recipientId = currentItem.recipientId,
+                                        claimToken = currentItem.claimToken,
+                                        status = "failed",
+                                        transport = "android_batch",
+                                        errorMessage = handoff.error,
+                                    )
+                            } catch (
+                                exception: Exception
+                            ) {
+                                null
+                            }
+
+                        runOnUi {
+                            fetchedSendState =
+                                "failed"
+
+                            batchRunning =
+                                false
+
+                            batchStatus =
+                                if (
+                                    failedResult?.isSuccess == true
+                                ) {
+                                    "Batch stopped: Android rejected the current send before handoff. FAILED was recorded."
+                                } else {
+                                    "Batch stopped: Android rejected the current send before handoff, and failure reporting could not be confirmed. Verify Streamlit before continuing."
+                                }
+                        }
+
+                        break
+                    }
+
+                    runOnUi {
+                        fetchedSendState =
+                            "handed_off"
+
+                        gatewayStatus =
+                            "Android accepted ${currentItem.contactName}. Recording SUBMITTED before the batch may advance."
+                    }
+
+                    val submittedResult =
+                        try {
+                            GatewayApiReporter
+                                .postRecipientStatus(
+                                    gatewayUrl = gatewayUrl,
+                                    gatewayToken = gatewayToken,
+                                    recipientId = currentItem.recipientId,
+                                    claimToken = currentItem.claimToken,
+                                    status = "submitted",
+                                    transport = "android_batch",
+                                )
+                        } catch (
+                            exception: Exception
+                        ) {
+                            null
+                        }
+
+                    // Do not stop the batch merely because the SUBMITTED POST
+                    // itself returned an error or lost its response. A normal
+                    // SMS sent callback may already have advanced this same
+                    // recipient to SENT. Instead, verify the recipient's
+                    // authoritative database state before deciding whether it
+                    // is safe to continue.
+                    val submittedPostConfirmed =
+                        submittedResult?.isSuccess == true
+
+                    if (
+                        !submittedPostConfirmed
+                    ) {
+                        runOnUi {
+                            batchStatus =
+                                when {
+                                    submittedResult == null ->
+                                        "SUBMITTED report was interrupted. Checking the gateway's recorded recipient state before deciding whether the batch may continue..."
+
+                                    else ->
+                                        "SUBMITTED report returned HTTP ${submittedResult.responseCode}. Checking the gateway's recorded recipient state before deciding whether the batch may continue..."
+                                }
+                        }
+                    }
+
+                    // Give the normal SMS callback a short opportunity to
+                    // upgrade SUBMITTED to SENT or report a definite failure.
+                    // RCS may never produce that callback, so after five
+                    // seconds a database-confirmed SUBMITTED is allowed to
+                    // advance. If the initial SUBMITTED POST was not confirmed,
+                    // this polling step must observe SUBMITTED or SENT before
+                    // another household can ever be claimed.
+                    val waitStarted =
+                        System.currentTimeMillis()
+
+                    var observedStatus =
+                        if (
+                            submittedPostConfirmed
+                        ) {
+                            "submitted"
+                        } else {
+                            "unknown"
+                        }
+
+                    while (
+                        System.currentTimeMillis()
+                        - waitStarted
+                        < 5000L
+                    ) {
+                        Thread.sleep(
+                            250L
+                        )
+
+                        val serverStatus =
+                            fetchRecipientStatusBlocking(
+                                currentItem
+                            )
+
+                        if (
+                            serverStatus != null
+                        ) {
+                            observedStatus =
+                                serverStatus
+                        }
+
+                        val elapsed =
+                            System.currentTimeMillis()
+                            - waitStarted
+
+                        if (
+                            observedStatus == "failed"
+                        ) {
+                            break
+                        }
+
+                        if (
+                            observedStatus == "sent"
+                            && elapsed >= 2000L
+                        ) {
+                            break
+                        }
+                    }
+
+                    // One final status read immediately before considering
+                    // another claim reduces the chance that a late definite
+                    // SMS failure is missed.
+                    fetchRecipientStatusBlocking(
+                        currentItem
+                    )?.let {
+                        observedStatus =
+                            it
+                    }
+
+                    if (
+                        observedStatus == "failed"
+                    ) {
+                        fetchMessageSummaryBlocking(
+                            targetMessageId
+                        )?.let { summary ->
+                            runOnUi {
+                                updateBatchSummary(
+                                    summary
+                                )
+                            }
+                        }
+
+                        runOnUi {
+                            fetchedSendState =
+                                "failed"
+
+                            batchRunning =
+                                false
+
+                            batchStatus =
+                                "Batch stopped on a definite send failure for ${currentItem.contactName}. No next household was claimed."
+                        }
+
+                        break
+                    }
+
+                    if (
+                        observedStatus !in listOf(
+                            "submitted",
+                            "sent",
+                        )
+                    ) {
+                        runOnUi {
+                            batchRunning =
+                                false
+
+                            fetchedSendState =
+                                "handed_off"
+
+                            batchStatus =
+                                if (
+                                    observedStatus == "unknown"
+                                ) {
+                                    "Batch safety stop: Android handed off the current message, but the gateway never confirmed SUBMITTED or SENT. Do not resend it. Verify Streamlit before continuing."
+                                } else {
+                                    "Batch safety stop: the current recipient is in an unexpected gateway state ($observedStatus). Verify Streamlit before continuing."
+                                }
+                        }
+
+                        break
+                    }
+
+                    val summaryAfterSend =
+                        fetchMessageSummaryBlocking(
+                            targetMessageId
+                        )
+
+                    if (
+                        summaryAfterSend != null
+                    ) {
+                        runOnUi {
+                            updateBatchSummary(
+                                summaryAfterSend
+                            )
+                        }
+                    }
+
+                    runOnUi {
+                        fetchedSendState =
+                            observedStatus
+
+                        batchStatus =
+                            if (
+                                observedStatus == "sent"
+                            ) {
+                                "${currentItem.contactName} is SENT."
+                            } else {
+                                "${currentItem.contactName} is SUBMITTED. No automatic retry will occur."
+                            }
+                    }
+
+                    if (
+                        batchStopSignal.get()
+                    ) {
+                        runOnUi {
+                            batchRunning =
+                                false
+
+                            batchStopRequested =
+                                false
+
+                            batchStatus =
+                                "Batch stopped after the current household as requested. No next household was claimed."
+                        }
+
+                        break
+                    }
+
+                    val nextItem =
+                        claimNextForMessageBlocking(
+                            targetMessageId
+                        )
+
+                    if (
+                        nextItem == null
+                    ) {
+                        val finalSummary =
+                            fetchMessageSummaryBlocking(
+                                targetMessageId
+                            )
+
+                        runOnUi {
+                            if (
+                                finalSummary != null
+                            ) {
+                                updateBatchSummary(
+                                    finalSummary
+                                )
+                            }
+
+                            batchRunning =
+                                false
+
+                            batchStopRequested =
+                                false
+
+                            batchStatus =
+                                if (
+                                    finalSummary != null
+                                    && finalSummary.remaining == 0
+                                    && finalSummary.failed == 0
+                                ) {
+                                    "Message #$targetMessageId batch complete."
+                                } else {
+                                    "Batch paused: there is no additional claimable recipient for Message #$targetMessageId. Check Streamlit before continuing."
+                                }
+                        }
+
+                        break
+                    }
+
+                    // If Stop After Current races with the claim request,
+                    // immediately release the newly claimed item rather than
+                    // sending it.
+                    if (
+                        batchStopSignal.get()
+                    ) {
+                        try {
+                            GatewayApiReporter
+                                .postRecipientStatus(
+                                    gatewayUrl = gatewayUrl,
+                                    gatewayToken = gatewayToken,
+                                    recipientId = nextItem.recipientId,
+                                    claimToken = nextItem.claimToken,
+                                    status = "released",
+                                    transport = "android_batch",
+                                )
+                        } catch (
+                            exception: Exception
+                        ) {
+                            runOnUi {
+                                applyFetchedItem(
+                                    nextItem
+                                )
+
+                                fetchedSendState =
+                                    "release_unknown"
+                            }
+                        }
+
+                        runOnUi {
+                            batchRunning =
+                                false
+
+                            batchStopRequested =
+                                false
+
+                            batchStatus =
+                                "Batch stopped after the current household. A raced next claim was released without sending."
+                        }
+
+                        break
+                    }
+
+                    currentItem =
+                        nextItem
+                }
+
+            } catch (
+                exception: Exception
+            ) {
+                runOnUi {
+                    batchRunning =
+                        false
+
+                    batchStatus =
+                        "Batch safety stop: ${
+                            exception.message
+                                ?: "Unknown error"
+                        }. Verify Streamlit before continuing."
+                }
+            }
+
+        }.start()
     }
 
 
@@ -612,8 +1677,10 @@ fun MessengerScreen(
         }
 
         if (
-            fetchedRecipientId != null
-            && fetchedSendState in listOf(
+            batchRunning
+            || (
+                fetchedRecipientId != null
+                && fetchedSendState in listOf(
                 "claimed",
                 "cancelling",
                 "cancel_unknown",
@@ -621,6 +1688,7 @@ fun MessengerScreen(
                 "release_unknown",
                 "sending",
                 "handed_off",
+            )
             )
         ) {
             gatewayStatus =
@@ -1543,6 +2611,9 @@ fun MessengerScreen(
                 "gateway_claim" ->
                     sendFetchedClaimNow()
 
+                "gateway_batch" ->
+                    startHouseholdBatchNow()
+
                 "manual" ->
                     sendManualMessageNow()
             }
@@ -1760,7 +2831,8 @@ fun MessengerScreen(
                     },
                 )
             },
-            enabled = !(
+            enabled = !batchRunning
+                && !(
                 fetchedRecipientId != null
                 && fetchedSendState in listOf(
                     "claimed",
@@ -1800,7 +2872,7 @@ fun MessengerScreen(
 
         Text(
             text =
-                "Claims one real queued household at a time. Nothing sends until you approve it.",
+                "Fetch one household to review it. You can then send manually or start a controlled batch for that message only.",
             style =
                 MaterialTheme
                     .typography
@@ -1823,7 +2895,8 @@ fun MessengerScreen(
                     },
                 )
             },
-            enabled = !(
+            enabled = !batchRunning
+                && !(
                 fetchedRecipientId != null
                 && fetchedSendState in listOf(
                     "claimed",
@@ -1842,6 +2915,97 @@ fun MessengerScreen(
                 "Fetch Next Household"
             )
         }
+
+        if (
+            batchMessageId != null
+        ) {
+            Spacer(
+                modifier =
+                    Modifier.height(
+                        14.dp
+                    )
+            )
+
+            Text(
+                text =
+                    "Batch Message #$batchMessageId",
+                style =
+                    MaterialTheme
+                        .typography
+                        .titleSmall,
+                fontWeight =
+                    FontWeight.Bold
+            )
+
+            Text(
+                text =
+                    "Processed: ${batchSubmitted + batchSent + batchFailed} of $batchTotal  •  Sent: $batchSent  •  Submitted: $batchSubmitted  •  Failed: $batchFailed  •  Remaining: ${batchQueued + batchClaimed}",
+                style =
+                    MaterialTheme
+                        .typography
+                        .bodySmall
+            )
+
+            if (
+                batchStatus.isNotBlank()
+            ) {
+                Spacer(
+                    modifier =
+                        Modifier.height(
+                            6.dp
+                        )
+                )
+
+                Text(
+                    text =
+                        batchStatus,
+                    style =
+                        MaterialTheme
+                            .typography
+                            .bodySmall
+                )
+            }
+
+            if (
+                batchRunning
+            ) {
+                Spacer(
+                    modifier =
+                        Modifier.height(
+                            10.dp
+                        )
+                )
+
+                Button(
+                    onClick = {
+                        batchStopSignal.set(
+                            true
+                        )
+
+                        batchStopRequested =
+                            true
+
+                        batchStatus =
+                            "Stop requested. The current household will finish, then the batch will stop."
+                    },
+                    enabled =
+                        !batchStopRequested,
+                    modifier =
+                        Modifier.fillMaxWidth()
+                ) {
+                    Text(
+                        if (
+                            batchStopRequested
+                        ) {
+                            "Stop Requested"
+                        } else {
+                            "Stop After Current"
+                        }
+                    )
+                }
+            }
+        }
+
 
         if (
             gatewayStatus.isNotBlank()
@@ -2069,6 +3233,32 @@ fun MessengerScreen(
                     }
 
                 } else {
+
+                    Button(
+                        onClick = {
+                            requireSmsThen(
+                                action = "gateway_batch",
+                                block = {
+                                    startHouseholdBatchNow()
+                                },
+                            )
+                        },
+                        enabled =
+                            !batchRunning,
+                        modifier =
+                            Modifier.fillMaxWidth()
+                    ) {
+                        Text(
+                            "Start This Message Batch"
+                        )
+                    }
+
+                    Spacer(
+                        modifier =
+                            Modifier.height(
+                                10.dp
+                            )
+                    )
 
                     Button(
                         onClick = {

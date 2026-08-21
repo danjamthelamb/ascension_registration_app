@@ -16,6 +16,7 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,14 +24,21 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -40,6 +48,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -341,14 +350,29 @@ fun MessengerScreen(
     // Gateway state
     // =====================================================
 
+    val gatewayPreferences = remember {
+        context.getSharedPreferences(
+            "ascension_messenger_gateway",
+            Context.MODE_PRIVATE,
+        )
+    }
+
     var gatewayUrl by rememberSaveable {
         mutableStateOf(
-            "http://192.168.4.46:8001"
+            gatewayPreferences.getString(
+                "gateway_url",
+                "http://192.168.4.46:8001",
+            ) ?: "http://192.168.4.46:8001"
         )
     }
 
     var gatewayToken by rememberSaveable {
-        mutableStateOf("")
+        mutableStateOf(
+            gatewayPreferences.getString(
+                "gateway_token",
+                "",
+            ) ?: ""
+        )
     }
 
     var gatewayStatus by rememberSaveable {
@@ -357,6 +381,14 @@ fun MessengerScreen(
 
     var pendingLocalNetworkAction by rememberSaveable {
         mutableStateOf("")
+    }
+
+    var showConnectionSettings by rememberSaveable {
+        mutableStateOf(false)
+    }
+
+    var showTroubleshooting by rememberSaveable {
+        mutableStateOf(false)
     }
 
 
@@ -525,6 +557,21 @@ fun MessengerScreen(
             .runOnUiThread {
                 block()
             }
+    }
+
+
+    fun saveGatewaySettings() {
+        gatewayPreferences
+            .edit()
+            .putString(
+                "gateway_url",
+                gatewayUrl.trim(),
+            )
+            .putString(
+                "gateway_token",
+                gatewayToken.trim(),
+            )
+            .apply()
     }
 
 
@@ -2655,6 +2702,72 @@ fun MessengerScreen(
     // UI
     // =====================================================
 
+    val gatewayConfigured =
+        gatewayUrl.isNotBlank()
+        && gatewayToken.isNotBlank()
+
+    val gatewayConnected =
+        gatewayStatus.startsWith(
+            "Connected",
+            ignoreCase = true,
+        )
+
+    val gatewayNeedsAttention =
+        gatewayStatus.contains(
+            "failed",
+            ignoreCase = true,
+        )
+        || gatewayStatus.contains(
+            "HTTP",
+            ignoreCase = true,
+        )
+        || gatewayStatus.contains(
+            "permission was not granted",
+            ignoreCase = true,
+        )
+
+    val claimLocked =
+        fetchedRecipientId != null
+        && fetchedSendState in listOf(
+            "claimed",
+            "cancelling",
+            "cancel_unknown",
+            "releasing",
+            "release_unknown",
+            "sending",
+            "handed_off",
+        )
+
+    val canFetch =
+        !batchRunning
+        && !claimLocked
+
+    val batchProcessed =
+        batchSubmitted
+        + batchSent
+        + batchFailed
+
+    val batchRemaining =
+        batchQueued
+        + batchClaimed
+
+    val batchProgress =
+        if (
+            batchTotal > 0
+        ) {
+            batchProcessed
+                .toFloat()
+                .div(
+                    batchTotal.toFloat()
+                )
+                .coerceIn(
+                    0f,
+                    1f,
+                )
+        } else {
+            0f
+        }
+
     Column(
         modifier =
             modifier
@@ -2663,373 +2776,848 @@ fun MessengerScreen(
                     rememberScrollState()
                 ),
         verticalArrangement =
-            Arrangement.Top
+            Arrangement.Top,
     ) {
 
-        Text(
-            text =
-                "Ascension Messenger DEV",
-            style =
-                MaterialTheme
-                    .typography
-                    .headlineMedium
-        )
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    8.dp
-                )
-        )
-
-        Text(
-            text =
-                "Local messaging gateway",
-            style =
-                MaterialTheme
-                    .typography
-                    .bodyMedium
-        )
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    28.dp
-                )
-        )
-
-
         // -------------------------------------------------
-        // Gateway connection
+        // Brand / environment
         // -------------------------------------------------
 
-        Text(
-            text =
-                "Gateway",
-            style =
-                MaterialTheme
-                    .typography
-                    .titleLarge,
-            fontWeight =
-                FontWeight.Bold
-        )
-
-        Spacer(
+        Row(
             modifier =
-                Modifier.height(
-                    12.dp
-                )
-        )
-
-        OutlinedTextField(
-            value =
-                gatewayUrl,
-            onValueChange = {
-                gatewayUrl = it
-            },
-            label = {
-                Text(
-                    "Gateway URL"
-                )
-            },
-            singleLine =
-                true,
-            modifier =
-                Modifier.fillMaxWidth()
-        )
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    12.dp
-                )
-        )
-
-        OutlinedTextField(
-            value =
-                gatewayToken,
-            onValueChange = {
-                gatewayToken = it
-            },
-            label = {
-                Text(
-                    "Gateway token"
-                )
-            },
-            visualTransformation =
-                PasswordVisualTransformation(),
-            singleLine =
-                true,
-            modifier =
-                Modifier.fillMaxWidth()
-        )
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    12.dp
-                )
-        )
-
-        Button(
-            onClick = {
-                requireLocalNetworkThen(
-                    action = "test",
-                    block = {
-                        testGatewayNow()
-                    },
-                )
-            },
-            modifier =
-                Modifier.fillMaxWidth()
+                Modifier.fillMaxWidth(),
+            horizontalArrangement =
+                Arrangement.SpaceBetween,
+            verticalAlignment =
+                Alignment.CenterVertically,
         ) {
-            Text(
-                "Test Gateway"
-            )
-        }
 
-        Spacer(
-            modifier =
-                Modifier.height(
-                    18.dp
-                )
-        )
-
-        Text(
-            text =
-                "DEV Test Queue",
-            style =
-                MaterialTheme
-                    .typography
-                    .titleMedium,
-            fontWeight =
-                FontWeight.Bold
-        )
-
-        Text(
-            text =
-                "Manual one-number test messages only.",
-            style =
-                MaterialTheme
-                    .typography
-                    .bodySmall
-        )
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    8.dp
-                )
-        )
-
-        Button(
-            onClick = {
-                requireLocalNetworkThen(
-                    action = "fetch_test",
-                    block = {
-                        fetchNextQueuedTestNow()
-                    },
-                )
-            },
-            enabled = !batchRunning
-                && !(
-                fetchedRecipientId != null
-                && fetchedSendState in listOf(
-                    "claimed",
-                    "cancelling",
-                    "cancel_unknown",
-                    "releasing",
-                    "release_unknown",
-                    "sending",
-                    "handed_off",
-                )
-            ),
-            modifier =
-                Modifier.fillMaxWidth()
-        ) {
-            Text(
-                "Fetch Next TEST"
-            )
-        }
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    18.dp
-                )
-        )
-
-        Text(
-            text =
-                "Household Queue",
-            style =
-                MaterialTheme
-                    .typography
-                    .titleMedium,
-            fontWeight =
-                FontWeight.Bold
-        )
-
-        Text(
-            text =
-                "Fetch one household to review it. You can then send manually or start a controlled batch for that message only.",
-            style =
-                MaterialTheme
-                    .typography
-                    .bodySmall
-        )
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    8.dp
-                )
-        )
-
-        Button(
-            onClick = {
-                requireLocalNetworkThen(
-                    action = "fetch_household",
-                    block = {
-                        fetchNextQueuedHouseholdNow()
-                    },
-                )
-            },
-            enabled = !batchRunning
-                && !(
-                fetchedRecipientId != null
-                && fetchedSendState in listOf(
-                    "claimed",
-                    "cancelling",
-                    "cancel_unknown",
-                    "releasing",
-                    "release_unknown",
-                    "sending",
-                    "handed_off",
-                )
-            ),
-            modifier =
-                Modifier.fillMaxWidth()
-        ) {
-            Text(
-                "Fetch Next Household"
-            )
-        }
-
-        if (
-            batchMessageId != null
-        ) {
-            Spacer(
+            Column(
                 modifier =
-                    Modifier.height(
-                        14.dp
+                    Modifier.weight(
+                        1f
                     )
-            )
-
-            Text(
-                text =
-                    "Batch Message #$batchMessageId",
-                style =
-                    MaterialTheme
-                        .typography
-                        .titleSmall,
-                fontWeight =
-                    FontWeight.Bold
-            )
-
-            Text(
-                text =
-                    "Processed: ${batchSubmitted + batchSent + batchFailed} of $batchTotal  •  Sent: $batchSent  •  Submitted: $batchSubmitted  •  Failed: $batchFailed  •  Remaining: ${batchQueued + batchClaimed}",
-                style =
-                    MaterialTheme
-                        .typography
-                        .bodySmall
-            )
-
-            if (
-                batchStatus.isNotBlank()
             ) {
+
+                Text(
+                    text =
+                        "Ascension Messenger",
+                    style =
+                        MaterialTheme
+                            .typography
+                            .headlineMedium,
+                    fontWeight =
+                        FontWeight.Bold,
+                )
+
                 Spacer(
                     modifier =
                         Modifier.height(
-                            6.dp
+                            4.dp
                         )
                 )
 
                 Text(
                     text =
-                        batchStatus,
+                        "Faith Formation household messaging",
                     style =
                         MaterialTheme
                             .typography
-                            .bodySmall
+                            .bodyMedium,
+                    color =
+                        MaterialTheme
+                            .colorScheme
+                            .onSurfaceVariant,
                 )
             }
 
-            if (
-                batchRunning
+            Surface(
+                shape =
+                    RoundedCornerShape(
+                        999.dp
+                    ),
+                color =
+                    MaterialTheme
+                        .colorScheme
+                        .secondaryContainer,
             ) {
+                Text(
+                    text =
+                        "DEVELOPMENT",
+                    modifier =
+                        Modifier.padding(
+                            horizontal = 12.dp,
+                            vertical = 7.dp,
+                        ),
+                    style =
+                        MaterialTheme
+                            .typography
+                            .labelSmall,
+                    fontWeight =
+                        FontWeight.Bold,
+                    color =
+                        MaterialTheme
+                            .colorScheme
+                            .onSecondaryContainer,
+                )
+            }
+        }
+
+        Spacer(
+            modifier =
+                Modifier.height(
+                    24.dp
+                )
+        )
+
+
+        // -------------------------------------------------
+        // Connection summary
+        // -------------------------------------------------
+
+        Card(
+            modifier =
+                Modifier.fillMaxWidth(),
+            shape =
+                RoundedCornerShape(
+                    18.dp
+                ),
+            colors =
+                CardDefaults.cardColors(
+                    containerColor =
+                        MaterialTheme
+                            .colorScheme
+                            .surfaceContainerLow,
+                ),
+        ) {
+
+            Column(
+                modifier =
+                    Modifier.padding(
+                        18.dp
+                    )
+            ) {
+
+                Row(
+                    modifier =
+                        Modifier.fillMaxWidth(),
+                    horizontalArrangement =
+                        Arrangement.SpaceBetween,
+                    verticalAlignment =
+                        Alignment.CenterVertically,
+                ) {
+
+                    Column(
+                        modifier =
+                            Modifier.weight(
+                                1f
+                            )
+                    ) {
+                        Text(
+                            text =
+                                "Gateway",
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .titleMedium,
+                            fontWeight =
+                                FontWeight.Bold,
+                        )
+
+                        Spacer(
+                            modifier =
+                                Modifier.height(
+                                    2.dp
+                                )
+                        )
+
+                        Text(
+                            text =
+                                when {
+                                    gatewayConnected ->
+                                        "Connected and ready"
+
+                                    !gatewayConfigured ->
+                                        "Connection setup required"
+
+                                    gatewayNeedsAttention ->
+                                        "Connection needs attention"
+
+                                    else ->
+                                        "Configured — test when needed"
+                                },
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .bodySmall,
+                            color =
+                                MaterialTheme
+                                    .colorScheme
+                                    .onSurfaceVariant,
+                        )
+                    }
+
+                    MessengerStatusBadge(
+                        label =
+                            when {
+                                gatewayConnected ->
+                                    "Ready"
+
+                                !gatewayConfigured ->
+                                    "Setup"
+
+                                gatewayNeedsAttention ->
+                                    "Check"
+
+                                else ->
+                                    "Configured"
+                            },
+                        state =
+                            when {
+                                gatewayConnected ->
+                                    "sent"
+
+                                gatewayNeedsAttention ->
+                                    "failed"
+
+                                else ->
+                                    "queued"
+                            },
+                    )
+                }
+
+                if (
+                    gatewayStatus.isNotBlank()
+                ) {
+                    Spacer(
+                        modifier =
+                            Modifier.height(
+                                12.dp
+                            )
+                    )
+
+                    Text(
+                        text =
+                            gatewayStatus,
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodySmall,
+                        color =
+                            if (
+                                gatewayNeedsAttention
+                            ) {
+                                MaterialTheme
+                                    .colorScheme
+                                    .error
+                            } else {
+                                MaterialTheme
+                                    .colorScheme
+                                    .onSurfaceVariant
+                            },
+                    )
+                }
+
                 Spacer(
                     modifier =
                         Modifier.height(
+                            12.dp
+                        )
+                )
+
+                Row(
+                    modifier =
+                        Modifier.fillMaxWidth(),
+                    horizontalArrangement =
+                        Arrangement.spacedBy(
                             10.dp
+                        ),
+                ) {
+
+                    OutlinedButton(
+                        onClick = {
+                            requireLocalNetworkThen(
+                                action = "test",
+                                block = {
+                                    testGatewayNow()
+                                },
+                            )
+                        },
+                        enabled =
+                            gatewayConfigured,
+                        modifier =
+                            Modifier.weight(
+                                1f
+                            ),
+                    ) {
+                        Text(
+                            "Test Connection"
+                        )
+                    }
+
+                    TextButton(
+                        onClick = {
+                            showConnectionSettings =
+                                !showConnectionSettings
+                        },
+                        modifier =
+                            Modifier.weight(
+                                1f
+                            ),
+                    ) {
+                        Text(
+                            if (
+                                showConnectionSettings
+                            ) {
+                                "Hide Settings"
+                            } else {
+                                "Connection Settings"
+                            }
+                        )
+                    }
+                }
+
+                if (
+                    showConnectionSettings
+                ) {
+
+                    Spacer(
+                        modifier =
+                            Modifier.height(
+                                14.dp
+                            )
+                    )
+
+                    HorizontalDivider()
+
+                    Spacer(
+                        modifier =
+                            Modifier.height(
+                                14.dp
+                            )
+                    )
+
+                    OutlinedTextField(
+                        value =
+                            gatewayUrl,
+                        onValueChange = {
+                            gatewayUrl = it
+                        },
+                        label = {
+                            Text(
+                                "Gateway URL"
+                            )
+                        },
+                        singleLine =
+                            true,
+                        modifier =
+                            Modifier.fillMaxWidth(),
+                    )
+
+                    Spacer(
+                        modifier =
+                            Modifier.height(
+                                12.dp
+                            )
+                    )
+
+                    OutlinedTextField(
+                        value =
+                            gatewayToken,
+                        onValueChange = {
+                            gatewayToken = it
+                        },
+                        label = {
+                            Text(
+                                "Gateway token"
+                            )
+                        },
+                        visualTransformation =
+                            PasswordVisualTransformation(),
+                        singleLine =
+                            true,
+                        modifier =
+                            Modifier.fillMaxWidth(),
+                    )
+
+                    Spacer(
+                        modifier =
+                            Modifier.height(
+                                10.dp
+                            )
+                    )
+
+                    Text(
+                        text =
+                            "Saved only in this app's private local preferences on this Pixel.",
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodySmall,
+                        color =
+                            MaterialTheme
+                                .colorScheme
+                                .onSurfaceVariant,
+                    )
+
+                    Spacer(
+                        modifier =
+                            Modifier.height(
+                                12.dp
+                            )
+                    )
+
+                    Button(
+                        onClick = {
+                            saveGatewaySettings()
+
+                            requireLocalNetworkThen(
+                                action = "test",
+                                block = {
+                                    testGatewayNow()
+                                },
+                            )
+                        },
+                        enabled =
+                            gatewayConfigured,
+                        modifier =
+                            Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            "Save & Test Connection"
+                        )
+                    }
+                }
+            }
+        }
+
+        Spacer(
+            modifier =
+                Modifier.height(
+                    18.dp
+                )
+        )
+
+
+        // -------------------------------------------------
+        // Batch progress — surfaced before queue controls
+        // -------------------------------------------------
+
+        if (
+            batchMessageId != null
+        ) {
+
+            Card(
+                modifier =
+                    Modifier.fillMaxWidth(),
+                shape =
+                    RoundedCornerShape(
+                        18.dp
+                    ),
+                colors =
+                    CardDefaults.cardColors(
+                        containerColor =
+                            if (
+                                batchRunning
+                            ) {
+                                MaterialTheme
+                                    .colorScheme
+                                    .primaryContainer
+                            } else {
+                                MaterialTheme
+                                    .colorScheme
+                                    .surfaceContainerLow
+                            },
+                    ),
+            ) {
+
+                Column(
+                    modifier =
+                        Modifier.padding(
+                            18.dp
+                        )
+                ) {
+
+                    Row(
+                        modifier =
+                            Modifier.fillMaxWidth(),
+                        horizontalArrangement =
+                            Arrangement.SpaceBetween,
+                        verticalAlignment =
+                            Alignment.CenterVertically,
+                    ) {
+
+                        Column(
+                            modifier =
+                                Modifier.weight(
+                                    1f
+                                )
+                        ) {
+                            Text(
+                                text =
+                                    "Message #$batchMessageId",
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .titleLarge,
+                                fontWeight =
+                                    FontWeight.Bold,
+                            )
+
+                            Text(
+                                text =
+                                    if (
+                                        batchRunning
+                                    ) {
+                                        "Batch in progress"
+                                    } else if (
+                                        batchRemaining == 0
+                                        && batchFailed == 0
+                                        && batchTotal > 0
+                                    ) {
+                                        "Batch complete"
+                                    } else {
+                                        "Batch paused"
+                                    },
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .bodySmall,
+                            )
+                        }
+
+                        MessengerStatusBadge(
+                            label =
+                                if (
+                                    batchRunning
+                                ) {
+                                    "Sending"
+                                } else if (
+                                    batchRemaining == 0
+                                    && batchFailed == 0
+                                    && batchTotal > 0
+                                ) {
+                                    "Complete"
+                                } else if (
+                                    batchFailed > 0
+                                ) {
+                                    "Attention"
+                                } else {
+                                    "Paused"
+                                },
+                            state =
+                                if (
+                                    batchRunning
+                                ) {
+                                    "submitted"
+                                } else if (
+                                    batchRemaining == 0
+                                    && batchFailed == 0
+                                    && batchTotal > 0
+                                ) {
+                                    "sent"
+                                } else if (
+                                    batchFailed > 0
+                                ) {
+                                    "failed"
+                                } else {
+                                    "queued"
+                                },
+                        )
+                    }
+
+                    Spacer(
+                        modifier =
+                            Modifier.height(
+                                14.dp
+                            )
+                    )
+
+                    LinearProgressIndicator(
+                        progress =
+                            batchProgress,
+                        modifier =
+                            Modifier.fillMaxWidth(),
+                    )
+
+                    Spacer(
+                        modifier =
+                            Modifier.height(
+                                12.dp
+                            )
+                    )
+
+                    Row(
+                        modifier =
+                            Modifier.fillMaxWidth(),
+                        horizontalArrangement =
+                            Arrangement.spacedBy(
+                                8.dp
+                            ),
+                    ) {
+
+                        BatchMetric(
+                            label =
+                                "Processed",
+                            value =
+                                "$batchProcessed / $batchTotal",
+                            modifier =
+                                Modifier.weight(
+                                    1f
+                                ),
+                        )
+
+                        BatchMetric(
+                            label =
+                                "Sent",
+                            value =
+                                batchSent.toString(),
+                            modifier =
+                                Modifier.weight(
+                                    1f
+                                ),
+                        )
+
+                        BatchMetric(
+                            label =
+                                "Remaining",
+                            value =
+                                batchRemaining.toString(),
+                            modifier =
+                                Modifier.weight(
+                                    1f
+                                ),
+                        )
+                    }
+
+                    if (
+                        batchSubmitted > 0
+                        || batchFailed > 0
+                    ) {
+                        Spacer(
+                            modifier =
+                                Modifier.height(
+                                    8.dp
+                                )
+                        )
+
+                        Text(
+                            text =
+                                "Submitted: $batchSubmitted  •  Failed: $batchFailed",
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .bodySmall,
+                        )
+                    }
+
+                    if (
+                        batchStatus.isNotBlank()
+                    ) {
+                        Spacer(
+                            modifier =
+                                Modifier.height(
+                                    12.dp
+                                )
+                        )
+
+                        Text(
+                            text =
+                                batchStatus,
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .bodyMedium,
+                        )
+                    }
+
+                    if (
+                        batchRunning
+                    ) {
+                        Spacer(
+                            modifier =
+                                Modifier.height(
+                                    14.dp
+                                )
+                        )
+
+                        OutlinedButton(
+                            onClick = {
+                                batchStopSignal.set(
+                                    true
+                                )
+
+                                batchStopRequested =
+                                    true
+
+                                batchStatus =
+                                    "Stop requested. The current household will finish, then the batch will stop."
+                            },
+                            enabled =
+                                !batchStopRequested,
+                            modifier =
+                                Modifier.fillMaxWidth(),
+                        ) {
+                            Text(
+                                if (
+                                    batchStopRequested
+                                ) {
+                                    "Stop Requested"
+                                } else {
+                                    "Stop After Current"
+                                }
+                            )
+                        }
+                    }
+                }
+            }
+
+            Spacer(
+                modifier =
+                    Modifier.height(
+                        18.dp
+                    )
+            )
+        }
+
+
+        // -------------------------------------------------
+        // Main household queue
+        // -------------------------------------------------
+
+        Card(
+            modifier =
+                Modifier.fillMaxWidth(),
+            shape =
+                RoundedCornerShape(
+                    18.dp
+                ),
+            colors =
+                CardDefaults.cardColors(
+                    containerColor =
+                        MaterialTheme
+                            .colorScheme
+                            .surfaceContainerLow,
+                ),
+        ) {
+
+            Column(
+                modifier =
+                    Modifier.padding(
+                        18.dp
+                    )
+            ) {
+
+                Text(
+                    text =
+                        "Household Queue",
+                    style =
+                        MaterialTheme
+                            .typography
+                            .titleLarge,
+                    fontWeight =
+                        FontWeight.Bold,
+                )
+
+                Spacer(
+                    modifier =
+                        Modifier.height(
+                            4.dp
+                        )
+                )
+
+                Text(
+                    text =
+                        when {
+                            batchRunning ->
+                                "The current message batch is running one household at a time."
+
+                            fetchedRecipientId != null
+                            && !fetchedIsTest ->
+                                "Review the claimed household below before sending."
+
+                            else ->
+                                "Pull one queued household from Streamlit to review before anything is sent."
+                        },
+                    style =
+                        MaterialTheme
+                            .typography
+                            .bodyMedium,
+                    color =
+                        MaterialTheme
+                            .colorScheme
+                            .onSurfaceVariant,
+                )
+
+                Spacer(
+                    modifier =
+                        Modifier.height(
+                            16.dp
                         )
                 )
 
                 Button(
                     onClick = {
-                        batchStopSignal.set(
-                            true
+                        requireLocalNetworkThen(
+                            action = "fetch_household",
+                            block = {
+                                fetchNextQueuedHouseholdNow()
+                            },
                         )
-
-                        batchStopRequested =
-                            true
-
-                        batchStatus =
-                            "Stop requested. The current household will finish, then the batch will stop."
                     },
                     enabled =
-                        !batchStopRequested,
+                        canFetch
+                        && gatewayConfigured,
                     modifier =
-                        Modifier.fillMaxWidth()
+                        Modifier.fillMaxWidth(),
                 ) {
                     Text(
                         if (
-                            batchStopRequested
+                            fetchedRecipientId != null
+                            && !fetchedIsTest
+                            && fetchedSendState in listOf(
+                                "sent",
+                                "submitted",
+                                "failed",
+                                "released",
+                            )
                         ) {
-                            "Stop Requested"
+                            "Review Next Household"
                         } else {
-                            "Stop After Current"
+                            "Review Next Household"
                         }
+                    )
+                }
+
+                if (
+                    !gatewayConfigured
+                ) {
+                    Spacer(
+                        modifier =
+                            Modifier.height(
+                                8.dp
+                            )
+                    )
+
+                    Text(
+                        text =
+                            "Set the gateway URL and token above before pulling a household.",
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodySmall,
+                        color =
+                            MaterialTheme
+                                .colorScheme
+                                .onSurfaceVariant,
                     )
                 }
             }
         }
 
 
-        if (
-            gatewayStatus.isNotBlank()
-        ) {
-            Spacer(
-                modifier =
-                    Modifier.height(
-                        12.dp
-                    )
-            )
-
-            Text(
-                text =
-                    gatewayStatus,
-                style =
-                    MaterialTheme
-                        .typography
-                        .bodyMedium
-            )
-        }
-
-
         // -------------------------------------------------
-        // Claimed gateway item
+        // Claimed household / test item
         // -------------------------------------------------
 
         if (
@@ -3039,241 +3627,158 @@ fun MessengerScreen(
             Spacer(
                 modifier =
                     Modifier.height(
-                        24.dp
+                        18.dp
                     )
             )
 
-            HorizontalDivider()
-
-            Spacer(
+            Card(
                 modifier =
-                    Modifier.height(
-                        20.dp
-                    )
-            )
-
-            Text(
-                text =
-                    if (
-                        fetchedIsTest
-                    ) {
-                        "TEST MESSAGE"
-                    } else {
-                        "HOUSEHOLD MESSAGE"
-                    },
-                style =
-                    MaterialTheme
-                        .typography
-                        .titleLarge,
-                fontWeight =
-                    FontWeight.Bold
-            )
-
-            Spacer(
-                modifier =
-                    Modifier.height(
-                        10.dp
-                    )
-            )
-
-            Text(
-                text =
-                    "Message #$fetchedMessageId"
-            )
-
-            Text(
-                text =
-                    "Recipient: $fetchedContact"
-            )
-
-            Text(
-                text =
-                    "Phone: $fetchedPhone"
-            )
-
-            if (
-                fetchedHousehold.isNotBlank()
-            ) {
-                Text(
-                    text =
-                        if (
-                            fetchedIsTest
-                        ) {
-                            "Reference: $fetchedHousehold"
-                        } else {
-                            "Household: $fetchedHousehold"
-                        }
-                )
-            }
-
-            if (
-                fetchedChildren.isNotBlank()
-            ) {
-                Text(
-                    text =
-                        if (
-                            fetchedIsTest
-                        ) {
-                            "Source: $fetchedChildren"
-                        } else {
-                            "Children: $fetchedChildren"
-                        }
-                )
-            }
-
-            Text(
-                text =
-                    "State: ${
-                        fetchedSendState
-                            .ifBlank {
-                                "unknown"
-                            }
-                            .uppercase()
-                    }"
-            )
-
-            Spacer(
-                modifier =
-                    Modifier.height(
-                        14.dp
-                    )
-            )
-
-            Text(
-                text =
-                    fetchedMessage,
-                style =
-                    MaterialTheme
-                        .typography
-                        .bodyLarge
-            )
-
-            Spacer(
-                modifier =
-                    Modifier.height(
-                        16.dp
-                    )
-            )
-
-            if (
-                fetchedSendState == "claimed"
-            ) {
-
-                Text(
-                    text =
-                        if (
-                            fetchedIsTest
-                        ) {
-                            "Nothing has been sent yet. Review the number and message before continuing."
-                        } else {
-                            "Nothing has been sent yet. Review the household, recipient number, children, and exact message before continuing."
-                        },
-                    style =
-                        MaterialTheme
-                            .typography
-                            .bodySmall
-                )
-
-                Spacer(
-                    modifier =
-                        Modifier.height(
-                            12.dp
-                        )
-                )
-
-                Button(
-                    onClick = {
-                        requireSmsThen(
-                            action = "gateway_claim",
-                            block = {
-                                sendFetchedClaimNow()
+                    Modifier.fillMaxWidth(),
+                shape =
+                    RoundedCornerShape(
+                        18.dp
+                    ),
+                colors =
+                    CardDefaults.cardColors(
+                        containerColor =
+                            if (
+                                fetchedIsTest
+                            ) {
+                                MaterialTheme
+                                    .colorScheme
+                                    .secondaryContainer
+                            } else {
+                                MaterialTheme
+                                    .colorScheme
+                                    .surfaceContainerLow
                             },
-                        )
-                    },
+                    ),
+            ) {
+
+                Column(
                     modifier =
-                        Modifier.fillMaxWidth()
+                        Modifier.padding(
+                            18.dp
+                        )
                 ) {
-                    Text(
-                        if (
-                            fetchedIsTest
+
+                    Row(
+                        modifier =
+                            Modifier.fillMaxWidth(),
+                        horizontalArrangement =
+                            Arrangement.SpaceBetween,
+                        verticalAlignment =
+                            Alignment.CenterVertically,
+                    ) {
+
+                        Column(
+                            modifier =
+                                Modifier.weight(
+                                    1f
+                                )
                         ) {
-                            "Send This TEST"
-                        } else {
-                            "Send This Message"
+                            Text(
+                                text =
+                                    if (
+                                        fetchedIsTest
+                                    ) {
+                                        "DEV Test Message"
+                                    } else {
+                                        "Review Household"
+                                    },
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .titleLarge,
+                                fontWeight =
+                                    FontWeight.Bold,
+                            )
+
+                            Text(
+                                text =
+                                    "Message #$fetchedMessageId",
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .bodySmall,
+                                color =
+                                    MaterialTheme
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                            )
                         }
-                    )
-                }
 
-                Spacer(
-                    modifier =
-                        Modifier.height(
-                            10.dp
-                        )
-                )
-
-                if (
-                    fetchedIsTest
-                ) {
-
-                    Button(
-                        onClick = {
-                            requireLocalNetworkThen(
-                                action = "cancel_test",
-                                block = {
-                                    cancelFetchedTestNow()
-                                },
-                            )
-                        },
-                        modifier =
-                            Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            "Cancel This Claimed TEST"
-                        )
-                    }
-
-                } else {
-
-                    Button(
-                        onClick = {
-                            requireSmsThen(
-                                action = "gateway_batch",
-                                block = {
-                                    startHouseholdBatchNow()
-                                },
-                            )
-                        },
-                        enabled =
-                            !batchRunning,
-                        modifier =
-                            Modifier.fillMaxWidth()
-                    ) {
-                        Text(
-                            "Start This Message Batch"
+                        MessengerStatusBadge(
+                            label =
+                                fetchedSendState
+                                    .ifBlank {
+                                        "Unknown"
+                                    }
+                                    .replace(
+                                        "_",
+                                        " ",
+                                    )
+                                    .lowercase()
+                                    .replaceFirstChar {
+                                        it.uppercase()
+                                    },
+                            state =
+                                fetchedSendState,
                         )
                     }
 
                     Spacer(
                         modifier =
                             Modifier.height(
-                                10.dp
+                                16.dp
                             )
                     )
 
-                    Button(
-                        onClick = {
-                            requireLocalNetworkThen(
-                                action = "release_household",
-                                block = {
-                                    releaseFetchedHouseholdNow()
-                                },
-                            )
-                        },
-                        modifier =
-                            Modifier.fillMaxWidth()
+                    RecipientDetailRow(
+                        label =
+                            "Recipient",
+                        value =
+                            fetchedContact,
+                    )
+
+                    RecipientDetailRow(
+                        label =
+                            "Phone",
+                        value =
+                            fetchedPhone,
+                    )
+
+                    if (
+                        fetchedHousehold.isNotBlank()
                     ) {
-                        Text(
-                            "Release Without Sending"
+                        RecipientDetailRow(
+                            label =
+                                if (
+                                    fetchedIsTest
+                                ) {
+                                    "Reference"
+                                } else {
+                                    "Household ID"
+                                },
+                            value =
+                                fetchedHousehold,
+                        )
+                    }
+
+                    if (
+                        fetchedChildren.isNotBlank()
+                    ) {
+                        RecipientDetailRow(
+                            label =
+                                if (
+                                    fetchedIsTest
+                                ) {
+                                    "Source"
+                                } else {
+                                    "Children"
+                                },
+                            value =
+                                fetchedChildren,
                         )
                     }
 
@@ -3284,267 +3789,383 @@ fun MessengerScreen(
                             )
                     )
 
-                    Text(
-                        text =
-                            "Release returns this household to the queue. It does not mark the message sent and it does not skip the household permanently.",
-                        style =
+                    Surface(
+                        modifier =
+                            Modifier.fillMaxWidth(),
+                        shape =
+                            RoundedCornerShape(
+                                14.dp
+                            ),
+                        color =
                             MaterialTheme
-                                .typography
-                                .bodySmall
-                    )
+                                .colorScheme
+                                .surfaceContainerHighest,
+                    ) {
+                        Column(
+                            modifier =
+                                Modifier.padding(
+                                    16.dp
+                                )
+                        ) {
+                            Text(
+                                text =
+                                    "Message",
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .labelMedium,
+                                fontWeight =
+                                    FontWeight.Bold,
+                                color =
+                                    MaterialTheme
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                            )
+
+                            Spacer(
+                                modifier =
+                                    Modifier.height(
+                                        7.dp
+                                    )
+                            )
+
+                            Text(
+                                text =
+                                    fetchedMessage,
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .bodyLarge,
+                            )
+                        }
+                    }
+
+                    if (
+                        fetchedSendState == "claimed"
+                    ) {
+
+                        Spacer(
+                            modifier =
+                                Modifier.height(
+                                    16.dp
+                                )
+                        )
+
+                        if (
+                            fetchedIsTest
+                        ) {
+                            Button(
+                                onClick = {
+                                    requireSmsThen(
+                                        action = "gateway_claim",
+                                        block = {
+                                            sendFetchedClaimNow()
+                                        },
+                                    )
+                                },
+                                modifier =
+                                    Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    "Send Test Message"
+                                )
+                            }
+
+                            Spacer(
+                                modifier =
+                                    Modifier.height(
+                                        10.dp
+                                    )
+                            )
+
+                            OutlinedButton(
+                                onClick = {
+                                    requireLocalNetworkThen(
+                                        action = "cancel_test",
+                                        block = {
+                                            cancelFetchedTestNow()
+                                        },
+                                    )
+                                },
+                                modifier =
+                                    Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    "Cancel Test"
+                                )
+                            }
+
+                        } else {
+
+                            Text(
+                                text =
+                                    "Nothing has been sent yet. Starting the batch will process the remaining households for Message #$fetchedMessageId one at a time.",
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .bodySmall,
+                                color =
+                                    MaterialTheme
+                                        .colorScheme
+                                        .onSurfaceVariant,
+                            )
+
+                            Spacer(
+                                modifier =
+                                    Modifier.height(
+                                        12.dp
+                                    )
+                            )
+
+                            Button(
+                                onClick = {
+                                    requireSmsThen(
+                                        action = "gateway_batch",
+                                        block = {
+                                            startHouseholdBatchNow()
+                                        },
+                                    )
+                                },
+                                enabled =
+                                    !batchRunning,
+                                modifier =
+                                    Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    "Start Message Batch"
+                                )
+                            }
+
+                            Spacer(
+                                modifier =
+                                    Modifier.height(
+                                        10.dp
+                                    )
+                            )
+
+                            OutlinedButton(
+                                onClick = {
+                                    requireSmsThen(
+                                        action = "gateway_claim",
+                                        block = {
+                                            sendFetchedClaimNow()
+                                        },
+                                    )
+                                },
+                                modifier =
+                                    Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    "Send Only This Household"
+                                )
+                            }
+
+                            Spacer(
+                                modifier =
+                                    Modifier.height(
+                                        2.dp
+                                    )
+                            )
+
+                            TextButton(
+                                onClick = {
+                                    requireLocalNetworkThen(
+                                        action = "release_household",
+                                        block = {
+                                            releaseFetchedHouseholdNow()
+                                        },
+                                    )
+                                },
+                                modifier =
+                                    Modifier.fillMaxWidth(),
+                            ) {
+                                Text(
+                                    "Return Household to Queue"
+                                )
+                            }
+                        }
+                    }
+
+                    if (
+                        fetchedSendState in listOf(
+                            "cancel_unknown",
+                            "release_unknown",
+                            "handed_off",
+                        )
+                    ) {
+
+                        Spacer(
+                            modifier =
+                                Modifier.height(
+                                    14.dp
+                                )
+                        )
+
+                        Surface(
+                            modifier =
+                                Modifier.fillMaxWidth(),
+                            shape =
+                                RoundedCornerShape(
+                                    12.dp
+                                ),
+                            color =
+                                MaterialTheme
+                                    .colorScheme
+                                    .errorContainer,
+                        ) {
+                            Text(
+                                text =
+                                    "Safety lock: do not resend or release this household until its database status is verified in Streamlit.",
+                                modifier =
+                                    Modifier.padding(
+                                        14.dp
+                                    ),
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .bodySmall,
+                                fontWeight =
+                                    FontWeight.Bold,
+                                color =
+                                    MaterialTheme
+                                        .colorScheme
+                                        .onErrorContainer,
+                            )
+                        }
+                    }
+
+                    if (
+                        sendStatus.isNotBlank()
+                        || gatewayCallbackStatus.isNotBlank()
+                        || deliveryStatus.isNotBlank()
+                    ) {
+
+                        Spacer(
+                            modifier =
+                                Modifier.height(
+                                    14.dp
+                                )
+                        )
+
+                        HorizontalDivider()
+
+                        Spacer(
+                            modifier =
+                                Modifier.height(
+                                    12.dp
+                                )
+                        )
+
+                        Text(
+                            text =
+                                "Delivery status",
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .labelLarge,
+                            fontWeight =
+                                FontWeight.Bold,
+                        )
+
+                        if (
+                            sendStatus.isNotBlank()
+                        ) {
+                            Spacer(
+                                modifier =
+                                    Modifier.height(
+                                        6.dp
+                                    )
+                            )
+
+                            Text(
+                                text =
+                                    sendStatus,
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .bodySmall,
+                            )
+                        }
+
+                        if (
+                            gatewayCallbackStatus.isNotBlank()
+                        ) {
+                            Spacer(
+                                modifier =
+                                    Modifier.height(
+                                        5.dp
+                                    )
+                            )
+
+                            Text(
+                                text =
+                                    gatewayCallbackStatus,
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .bodySmall,
+                            )
+                        }
+
+                        if (
+                            deliveryStatus.isNotBlank()
+                        ) {
+                            Spacer(
+                                modifier =
+                                    Modifier.height(
+                                        5.dp
+                                    )
+                            )
+
+                            Text(
+                                text =
+                                    deliveryStatus,
+                                style =
+                                    MaterialTheme
+                                        .typography
+                                        .bodySmall,
+                            )
+                        }
+                    }
                 }
-            }
-
-            if (
-                fetchedSendState in listOf(
-                    "cancel_unknown",
-                    "release_unknown",
-                    "handed_off",
-                )
-            ) {
-
-                Spacer(
-                    modifier =
-                        Modifier.height(
-                            12.dp
-                        )
-                )
-
-                Text(
-                    text =
-                        "Safety lock: do not resend or release this item until its database status is verified in Streamlit.",
-                    style =
-                        MaterialTheme
-                            .typography
-                            .bodySmall,
-                    fontWeight =
-                        FontWeight.Bold
-                )
-            }
-
-            if (
-                sendStatus.isNotBlank()
-            ) {
-                Spacer(
-                    modifier =
-                        Modifier.height(
-                            12.dp
-                        )
-                )
-
-                Text(
-                    text =
-                        sendStatus
-                )
-            }
-
-            if (
-                gatewayCallbackStatus.isNotBlank()
-            ) {
-                Spacer(
-                    modifier =
-                        Modifier.height(
-                            8.dp
-                        )
-                )
-
-                Text(
-                    text =
-                        gatewayCallbackStatus
-                )
-            }
-
-            if (
-                deliveryStatus.isNotBlank()
-            ) {
-                Spacer(
-                    modifier =
-                        Modifier.height(
-                            8.dp
-                        )
-                )
-
-                Text(
-                    text =
-                        deliveryStatus
-                )
             }
         }
 
 
-        Spacer(
-            modifier =
-                Modifier.height(
-                    32.dp
-                )
-        )
-
-        HorizontalDivider()
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    28.dp
-                )
-        )
-
-
         // -------------------------------------------------
-        // Existing diagnostics kept for troubleshooting
+        // Troubleshooting tools — hidden by default
         // -------------------------------------------------
 
-        Text(
-            text =
-                "Manual SMS Diagnostics",
-            style =
-                MaterialTheme
-                    .typography
-                    .titleLarge,
-            fontWeight =
-                FontWeight.Bold
-        )
-
         Spacer(
             modifier =
                 Modifier.height(
-                    16.dp
+                    24.dp
                 )
         )
 
-        OutlinedTextField(
-            value =
-                phoneNumber,
-            onValueChange = {
-                phoneNumber = it
-            },
-            label = {
-                Text(
-                    "Phone number"
-                )
-            },
-            keyboardOptions =
-                KeyboardOptions(
-                    keyboardType =
-                        KeyboardType.Phone
-                ),
-            singleLine =
-                true,
-            modifier =
-                Modifier.fillMaxWidth()
-        )
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    16.dp
-                )
-        )
-
-        OutlinedTextField(
-            value =
-                message,
-            onValueChange = {
-                message = it
-            },
-            label = {
-                Text(
-                    "Message"
-                )
-            },
-            minLines =
-                4,
-            modifier =
-                Modifier.fillMaxWidth()
-        )
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    8.dp
-                )
-        )
-
-        Text(
-            text =
-                "${message.length} characters",
-            style =
-                MaterialTheme
-                    .typography
-                    .bodySmall
-        )
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    20.dp
-                )
-        )
-
-        Button(
+        TextButton(
             onClick = {
+                showTroubleshooting =
+                    !showTroubleshooting
+            },
+            modifier =
+                Modifier.fillMaxWidth(),
+        ) {
+            Text(
                 if (
-                    phoneNumber.isBlank()
-                    || message.isBlank()
+                    showTroubleshooting
                 ) {
-                    SmsStatusStore.sendStatus =
-                        "Enter a phone number and message first."
+                    "Hide Troubleshooting Tools"
                 } else {
-                    requireSmsThen(
-                        action = "manual",
-                        block = {
-                            sendManualMessageNow()
-                        },
-                    )
+                    "Troubleshooting Tools"
                 }
-            },
-            modifier =
-                Modifier.fillMaxWidth()
-        ) {
-            Text(
-                "Send Manual Diagnostic"
-            )
-        }
-
-        Spacer(
-            modifier =
-                Modifier.height(
-                    12.dp
-                )
-        )
-
-        Button(
-            onClick = {
-                testSentCallback()
-            },
-            modifier =
-                Modifier.fillMaxWidth()
-        ) {
-            Text(
-                "Test Callback Only"
             )
         }
 
         if (
-            fetchedRecipientId == null
-            && sendStatus.isNotBlank()
+            showTroubleshooting
         ) {
-            Spacer(
-                modifier =
-                    Modifier.height(
-                        16.dp
-                    )
-            )
 
-            Text(
-                text =
-                    sendStatus
-            )
-        }
-
-        if (
-            fetchedRecipientId == null
-            && deliveryStatus.isNotBlank()
-        ) {
             Spacer(
                 modifier =
                     Modifier.height(
@@ -3552,18 +4173,510 @@ fun MessengerScreen(
                     )
             )
 
-            Text(
-                text =
-                    deliveryStatus
+            MessengerSectionCard(
+                title =
+                    "DEV Test Queue",
+                subtitle =
+                    "One-number test messages only. These never claim a real household.",
+            ) {
+
+                Button(
+                    onClick = {
+                        requireLocalNetworkThen(
+                            action = "fetch_test",
+                            block = {
+                                fetchNextQueuedTestNow()
+                            },
+                        )
+                    },
+                    enabled =
+                        canFetch
+                        && gatewayConfigured,
+                    modifier =
+                        Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "Review Next DEV Test"
+                    )
+                }
+            }
+
+            Spacer(
+                modifier =
+                    Modifier.height(
+                        12.dp
+                    )
             )
+
+            MessengerSectionCard(
+                title =
+                    "Manual SMS Diagnostics",
+                subtitle =
+                    "Direct Android SMS tools for troubleshooting only.",
+            ) {
+
+                OutlinedTextField(
+                    value =
+                        phoneNumber,
+                    onValueChange = {
+                        phoneNumber = it
+                    },
+                    label = {
+                        Text(
+                            "Phone number"
+                        )
+                    },
+                    keyboardOptions =
+                        KeyboardOptions(
+                            keyboardType =
+                                KeyboardType.Phone
+                        ),
+                    singleLine =
+                        true,
+                    modifier =
+                        Modifier.fillMaxWidth(),
+                )
+
+                Spacer(
+                    modifier =
+                        Modifier.height(
+                            12.dp
+                        )
+                )
+
+                OutlinedTextField(
+                    value =
+                        message,
+                    onValueChange = {
+                        message = it
+                    },
+                    label = {
+                        Text(
+                            "Message"
+                        )
+                    },
+                    minLines =
+                        4,
+                    modifier =
+                        Modifier.fillMaxWidth(),
+                )
+
+                Spacer(
+                    modifier =
+                        Modifier.height(
+                            6.dp
+                        )
+                )
+
+                Text(
+                    text =
+                        "${message.length} characters",
+                    style =
+                        MaterialTheme
+                            .typography
+                            .bodySmall,
+                    color =
+                        MaterialTheme
+                            .colorScheme
+                            .onSurfaceVariant,
+                )
+
+                Spacer(
+                    modifier =
+                        Modifier.height(
+                            14.dp
+                        )
+                )
+
+                Button(
+                    onClick = {
+                        if (
+                            phoneNumber.isBlank()
+                            || message.isBlank()
+                        ) {
+                            SmsStatusStore.sendStatus =
+                                "Enter a phone number and message first."
+                        } else {
+                            requireSmsThen(
+                                action = "manual",
+                                block = {
+                                    sendManualMessageNow()
+                                },
+                            )
+                        }
+                    },
+                    modifier =
+                        Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "Send Manual Diagnostic"
+                    )
+                }
+
+                Spacer(
+                    modifier =
+                        Modifier.height(
+                            8.dp
+                        )
+                )
+
+                OutlinedButton(
+                    onClick = {
+                        testSentCallback()
+                    },
+                    modifier =
+                        Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "Test Callback Only"
+                    )
+                }
+
+                if (
+                    fetchedRecipientId == null
+                    && sendStatus.isNotBlank()
+                ) {
+                    Spacer(
+                        modifier =
+                            Modifier.height(
+                                12.dp
+                            )
+                    )
+
+                    Text(
+                        text =
+                            sendStatus,
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodySmall,
+                    )
+                }
+
+                if (
+                    fetchedRecipientId == null
+                    && deliveryStatus.isNotBlank()
+                ) {
+                    Spacer(
+                        modifier =
+                            Modifier.height(
+                                6.dp
+                            )
+                    )
+
+                    Text(
+                        text =
+                            deliveryStatus,
+                        style =
+                            MaterialTheme
+                                .typography
+                                .bodySmall,
+                    )
+                }
+            }
         }
 
         Spacer(
             modifier =
                 Modifier.height(
-                    40.dp
+                    32.dp
                 )
         )
+    }
+}
+
+
+@Composable
+private fun MessengerSectionCard(
+    title: String,
+    subtitle: String,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+
+    Card(
+        modifier =
+            Modifier.fillMaxWidth(),
+        shape =
+            RoundedCornerShape(
+                18.dp
+            ),
+        colors =
+            CardDefaults.cardColors(
+                containerColor =
+                    MaterialTheme
+                        .colorScheme
+                        .surfaceContainerLow,
+            ),
+    ) {
+
+        Column(
+            modifier =
+                Modifier.padding(
+                    18.dp
+                )
+        ) {
+
+            Text(
+                text =
+                    title,
+                style =
+                    MaterialTheme
+                        .typography
+                        .titleMedium,
+                fontWeight =
+                    FontWeight.Bold,
+            )
+
+            Spacer(
+                modifier =
+                    Modifier.height(
+                        3.dp
+                    )
+            )
+
+            Text(
+                text =
+                    subtitle,
+                style =
+                    MaterialTheme
+                        .typography
+                        .bodySmall,
+                color =
+                    MaterialTheme
+                        .colorScheme
+                        .onSurfaceVariant,
+            )
+
+            Spacer(
+                modifier =
+                    Modifier.height(
+                        14.dp
+                    )
+            )
+
+            content()
+        }
+    }
+}
+
+
+@Composable
+private fun MessengerStatusBadge(
+    label: String,
+    state: String,
+) {
+
+    val normalized =
+        state
+            .trim()
+            .lowercase()
+
+    val containerColor =
+        when (
+            normalized
+        ) {
+            "sent",
+            "completed" ->
+                MaterialTheme
+                    .colorScheme
+                    .tertiaryContainer
+
+            "submitted",
+            "sending",
+            "claimed" ->
+                MaterialTheme
+                    .colorScheme
+                    .primaryContainer
+
+            "failed",
+            "handed_off",
+            "cancel_unknown",
+            "release_unknown" ->
+                MaterialTheme
+                    .colorScheme
+                    .errorContainer
+
+            else ->
+                MaterialTheme
+                    .colorScheme
+                    .surfaceContainerHighest
+        }
+
+    val contentColor =
+        when (
+            normalized
+        ) {
+            "sent",
+            "completed" ->
+                MaterialTheme
+                    .colorScheme
+                    .onTertiaryContainer
+
+            "submitted",
+            "sending",
+            "claimed" ->
+                MaterialTheme
+                    .colorScheme
+                    .onPrimaryContainer
+
+            "failed",
+            "handed_off",
+            "cancel_unknown",
+            "release_unknown" ->
+                MaterialTheme
+                    .colorScheme
+                    .onErrorContainer
+
+            else ->
+                MaterialTheme
+                    .colorScheme
+                    .onSurfaceVariant
+        }
+
+    Surface(
+        shape =
+            RoundedCornerShape(
+                999.dp
+            ),
+        color =
+            containerColor,
+    ) {
+        Text(
+            text =
+                label,
+            modifier =
+                Modifier.padding(
+                    horizontal = 11.dp,
+                    vertical = 6.dp,
+                ),
+            style =
+                MaterialTheme
+                    .typography
+                    .labelMedium,
+            fontWeight =
+                FontWeight.Bold,
+            color =
+                contentColor,
+        )
+    }
+}
+
+
+@Composable
+private fun RecipientDetailRow(
+    label: String,
+    value: String,
+) {
+
+    if (
+        value.isBlank()
+    ) {
+        return
+    }
+
+    Row(
+        modifier =
+            Modifier
+                .fillMaxWidth()
+                .padding(
+                    vertical = 4.dp
+                ),
+        horizontalArrangement =
+            Arrangement.spacedBy(
+                12.dp
+            ),
+    ) {
+
+        Text(
+            text =
+                label,
+            modifier =
+                Modifier.weight(
+                    0.34f
+                ),
+            style =
+                MaterialTheme
+                    .typography
+                    .bodySmall,
+            fontWeight =
+                FontWeight.Bold,
+            color =
+                MaterialTheme
+                    .colorScheme
+                    .onSurfaceVariant,
+        )
+
+        Text(
+            text =
+                value,
+            modifier =
+                Modifier.weight(
+                    0.66f
+                ),
+            style =
+                MaterialTheme
+                    .typography
+                    .bodyMedium,
+        )
+    }
+}
+
+
+@Composable
+private fun BatchMetric(
+    label: String,
+    value: String,
+    modifier: Modifier = Modifier,
+) {
+
+    Surface(
+        modifier =
+            modifier,
+        shape =
+            RoundedCornerShape(
+                12.dp
+            ),
+        color =
+            MaterialTheme
+                .colorScheme
+                .surface.copy(
+                    alpha = 0.7f
+                ),
+    ) {
+
+        Column(
+            modifier =
+                Modifier.padding(
+                    horizontal = 10.dp,
+                    vertical = 10.dp,
+                ),
+            horizontalAlignment =
+                Alignment.CenterHorizontally,
+        ) {
+            Text(
+                text =
+                    value,
+                style =
+                    MaterialTheme
+                        .typography
+                        .titleMedium,
+                fontWeight =
+                    FontWeight.Bold,
+            )
+
+            Text(
+                text =
+                    label,
+                style =
+                    MaterialTheme
+                        .typography
+                        .labelSmall,
+                color =
+                    MaterialTheme
+                        .colorScheme
+                        .onSurfaceVariant,
+            )
+        }
     }
 }
 

@@ -2808,11 +2808,11 @@ def admin_login_dialog():
 
 
 # ---------------------------------------------------------
-# Edit catechists dialog
+# Edit roster group dialog
 # ---------------------------------------------------------
 
-@st.dialog("Edit Catechists")
-def edit_catechists_dialog(
+@st.dialog("Edit Roster")
+def edit_roster_dialog(
     group: dict,
 ):
 
@@ -2832,8 +2832,8 @@ def edit_catechists_dialog(
     )
 
     st.caption(
-        "Enter the catechist names as you would like "
-        "them displayed on the roster."
+        "Update the catechists and classroom "
+        "assigned to this roster."
     )
 
     catechists = st.text_input(
@@ -2849,12 +2849,28 @@ def edit_catechists_dialog(
         ),
     )
 
+    classroom = st.text_input(
+        "Classroom",
+        value=(
+            group.get(
+                "classroom",
+                "",
+            )
+            or ""
+        ),
+        placeholder="Room 1 - St. Monica",
+        key=(
+            f"classroom_input_"
+            f"{group_key}"
+        ),
+    )
+
     if st.button(
-        "Save Catechists",
+        "Save Changes",
         type="primary",
         use_container_width=True,
         key=(
-            f"save_catechists_"
+            f"save_roster_"
             f"{group_key}"
         ),
     ):
@@ -2866,12 +2882,17 @@ def edit_catechists_dialog(
                 catechists,
             )
 
+            update_roster_group_classroom(
+                group_key,
+                classroom,
+            )
+
             st.rerun()
 
         except Exception:
 
             st.error(
-                "We couldn't save the catechist names right now. "
+                "We couldn't save the roster changes right now. "
                 "Please try again."
             )
 
@@ -5349,13 +5370,13 @@ def render_roster_card(
             if st.button(
                 "Edit",
                 key=(
-                    f"edit_catechists_"
+                    f"edit_roster_"
                     f"{group_key}"
                 ),
                 use_container_width=True,
             ):
 
-                edit_catechists_dialog(
+                edit_roster_dialog(
                     group
                 )
 
@@ -5394,49 +5415,20 @@ def render_roster_card(
                 "",
             )
             or ""
-        )
+        ).strip()
 
-        classroom_value = (
-            st.text_input(
-                "Classroom",
-                value=classroom,
-                placeholder="Room 1 - St. Monica",
-                key=(
-                    f"classroom_"
-                    f"{group_key}"
-                ),
+        if classroom:
+
+            st.write(
+                f"**Classroom:** "
+                f"{classroom}"
             )
-        )
 
-        if (
-            classroom_value.strip()
-            != classroom.strip()
-        ):
+        else:
 
-            if st.button(
-                "Save Classroom",
-                key=(
-                    f"save_classroom_"
-                    f"{group_key}"
-                ),
-                use_container_width=True,
-            ):
-
-                try:
-
-                    update_roster_group_classroom(
-                        group_key,
-                        classroom_value,
-                    )
-
-                    st.rerun()
-
-                except Exception:
-
-                    st.error(
-                        "We couldn't save the classroom right now. "
-                        "Please try again."
-                    )
+            st.caption(
+                "Classroom: Not assigned"
+            )
 
         st.write("")
 
@@ -5569,10 +5561,7 @@ def render_roster_card(
         pdf_data = (
             build_roster_pdf(
                 title=title,
-                classroom=(
-                    classroom_value
-                    .strip()
-                ),
+                classroom=classroom,
                 catechists=catechists,
                 children=group_children,
             )
@@ -5608,10 +5597,7 @@ def render_roster_card(
         attendance_data = (
             build_attendance_sheet(
                 title=title,
-                classroom=(
-                    classroom_value
-                    .strip()
-                ),
+                classroom=classroom,
                 catechists=catechists,
                 children=group_children,
             )

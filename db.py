@@ -221,6 +221,196 @@ def init_db() -> None:
         )
 
         # -------------------------------------------------
+        # Catechetical years
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS catechetical_years (
+                year_id BIGSERIAL PRIMARY KEY,
+
+                name TEXT NOT NULL UNIQUE,
+                start_year INTEGER NOT NULL UNIQUE,
+                end_year INTEGER NOT NULL UNIQUE,
+
+                status TEXT NOT NULL DEFAULT 'closed',
+                renewal_open BOOLEAN NOT NULL DEFAULT FALSE,
+
+                started_at TIMESTAMPTZ,
+                started_by TEXT,
+
+                created_at TIMESTAMPTZ NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP,
+
+                CONSTRAINT chk_catechetical_year_status
+                    CHECK (
+                        status IN (
+                            'active',
+                            'closed'
+                        )
+                    ),
+
+                CONSTRAINT chk_catechetical_year_range
+                    CHECK (
+                        end_year = start_year + 1
+                    )
+            );
+            """
+        )
+
+        # Only one catechetical year may be active.
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                idx_one_active_catechetical_year
+            ON catechetical_years (
+                (status)
+            )
+            WHERE status = 'active';
+            """
+        )
+
+        # -------------------------------------------------
+        # Yearly enrollments
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS yearly_enrollments (
+                enrollment_id BIGSERIAL PRIMARY KEY,
+
+                child_id BIGINT NOT NULL,
+                year_id BIGINT NOT NULL,
+
+                grade TEXT NOT NULL,
+                school TEXT NOT NULL,
+
+                school_verified BOOLEAN NOT NULL
+                    DEFAULT FALSE,
+
+                enrollment_status TEXT NOT NULL
+                    DEFAULT 'enrolled',
+
+                receiving_first_communion_reconciliation
+                    BOOLEAN NOT NULL DEFAULT FALSE,
+
+                receiving_confirmation
+                    BOOLEAN NOT NULL DEFAULT FALSE,
+
+                registered_at TIMESTAMPTZ NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP,
+
+                CONSTRAINT fk_yearly_enrollment_child
+                    FOREIGN KEY (child_id)
+                    REFERENCES children (child_id)
+                    ON DELETE RESTRICT,
+
+                CONSTRAINT fk_yearly_enrollment_year
+                    FOREIGN KEY (year_id)
+                    REFERENCES catechetical_years (year_id)
+                    ON DELETE RESTRICT,
+
+                CONSTRAINT uq_child_catechetical_year
+                    UNIQUE (child_id, year_id),
+
+                CONSTRAINT chk_enrollment_status
+                    CHECK (
+                        enrollment_status IN (
+                            'enrolled',
+                            'withdrawn'
+                        )
+                    )
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_yearly_enrollments_year_id
+            ON yearly_enrollments (year_id);
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_yearly_enrollments_child_id
+            ON yearly_enrollments (child_id);
+            """
+        )
+
+        # -------------------------------------------------
+        # Child sacraments
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS child_sacraments (
+                child_sacrament_id BIGSERIAL PRIMARY KEY,
+
+                child_id BIGINT NOT NULL,
+
+                sacrament TEXT NOT NULL,
+
+                received BOOLEAN NOT NULL
+                    DEFAULT FALSE,
+
+                received_date DATE,
+
+                parish TEXT,
+                notes TEXT,
+
+                created_at TIMESTAMPTZ NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP,
+
+                CONSTRAINT fk_child_sacrament_child
+                    FOREIGN KEY (child_id)
+                    REFERENCES children (child_id)
+                    ON DELETE CASCADE,
+
+                CONSTRAINT uq_child_sacrament
+                    UNIQUE (child_id, sacrament)
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_child_sacraments_child_id
+            ON child_sacraments (child_id);
+            """
+        )
+
+        # -------------------------------------------------
+        # Seed current catechetical year
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            INSERT INTO catechetical_years (
+                name,
+                start_year,
+                end_year,
+                status,
+                renewal_open,
+                started_at
+            )
+            VALUES (
+                '2026-2027',
+                2026,
+                2027,
+                'active',
+                FALSE,
+                CURRENT_TIMESTAMP
+            )
+            ON CONFLICT (name)
+            DO NOTHING;
+            """
+        )
+
+        # -------------------------------------------------
         # Household verification codes
         # -------------------------------------------------
 
@@ -2155,6 +2345,66 @@ def update_roster_group_classroom(
             WHERE group_key = %s;
             """,
             (
+                classroom,
+                group_key,
+            ),
+        )
+
+        if cursor.rowcount == 0:
+
+            raise ValueError(
+                f"Unknown roster group: "
+                f"{group_key}"
+            )
+
+# ---------------------------------------------------------
+# Update roster details
+# ---------------------------------------------------------
+
+def update_roster_group_details(
+    group_key: str,
+    catechists: str,
+    classroom: str,
+) -> None:
+    """
+    Update the catechists and classroom
+    assigned to one roster group.
+    """
+
+    group_key = (
+        group_key
+        .strip()
+        .lower()
+    )
+
+    catechists = (
+        catechists
+        .strip()
+    )
+
+    classroom = (
+        classroom
+        .strip()
+    )
+
+    if not group_key:
+
+        raise ValueError(
+            "Roster group cannot be empty."
+        )
+
+    with _connect() as conn:
+
+        cursor = conn.execute(
+            """
+            UPDATE roster_groups
+            SET
+                catechists = %s,
+                classroom = %s
+            WHERE group_key = %s;
+            """,
+            (
+                catechists,
                 classroom,
                 group_key,
             ),

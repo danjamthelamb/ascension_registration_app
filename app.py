@@ -1,3 +1,9 @@
+# ---------------------------------------------------------
+# File Name: app.py
+# Last Modified: 2024-06-19
+# Last Modified By: Daniel James Ardoin
+# ---------------------------------------------------------
+
 from __future__ import annotations
 
 import base64

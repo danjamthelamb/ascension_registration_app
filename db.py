@@ -1,3 +1,9 @@
+# ---------------------------------------------------------
+# File Name: db.py
+# Last Modified: 2024-06-19
+# Last Modified By: Daniel James Ardoin
+# ---------------------------------------------------------
+
 from __future__ import annotations
 
 import hashlib
@@ -47,8 +53,8 @@ def _connect() -> psycopg.Connection:
 
 def init_db() -> None:
     """
-    Create all application tables, indexes, migrations,
-    and standard roster groups if they do not already exist.
+    Create all application tables, indexes, and migrations
+    if they do not already exist.
 
     Safe to run every time the app starts.
     """
@@ -145,19 +151,6 @@ def init_db() -> None:
 
                 date_of_birth DATE NOT NULL,
 
-                grade TEXT NOT NULL,
-                school TEXT NOT NULL,
-
-                receiving_first_communion_reconciliation
-                    BOOLEAN NOT NULL DEFAULT FALSE,
-
-                receiving_confirmation
-                    BOOLEAN NOT NULL DEFAULT FALSE,
-
-                baptism_status TEXT,
-                first_reconciliation_status TEXT,
-                first_communion_status TEXT,
-
                 CONSTRAINT fk_children_household
                     FOREIGN KEY (household_id)
                     REFERENCES households (household_id)
@@ -166,75 +159,11 @@ def init_db() -> None:
             """
         )
 
-        # -------------------------------------------------
-        # Child migrations
-        # -------------------------------------------------
-
-        conn.execute(
-            """
-            ALTER TABLE children
-            ADD COLUMN IF NOT EXISTS
-                receiving_first_communion_reconciliation
-                BOOLEAN NOT NULL DEFAULT FALSE;
-            """
-        )
-
-        conn.execute(
-            """
-            ALTER TABLE children
-            ADD COLUMN IF NOT EXISTS
-                receiving_confirmation
-                BOOLEAN NOT NULL DEFAULT FALSE;
-            """
-        )
-
-        conn.execute(
-            """
-            ALTER TABLE children
-            ADD COLUMN IF NOT EXISTS
-                baptism_status TEXT;
-            """
-        )
-
-        conn.execute(
-            """
-            ALTER TABLE children
-            ADD COLUMN IF NOT EXISTS
-                first_reconciliation_status TEXT;
-            """
-        )
-
-        conn.execute(
-            """
-            ALTER TABLE children
-            ADD COLUMN IF NOT EXISTS
-                first_communion_status TEXT;
-            """
-        )
-
         conn.execute(
             """
             CREATE INDEX IF NOT EXISTS
                 idx_children_household_id
             ON children (household_id);
-            """
-        ) 
-
-        # -------------------------------------------------
-        # Annual child fields now live in yearly_enrollments
-        # -------------------------------------------------
-
-        conn.execute(
-            """
-            ALTER TABLE children
-            ALTER COLUMN grade DROP NOT NULL;
-            """
-        )
-
-        conn.execute(
-            """
-            ALTER TABLE children
-            ALTER COLUMN school DROP NOT NULL;
             """
         )
 
@@ -580,112 +509,6 @@ def init_db() -> None:
             ON admin_verification_codes (email);
             """
         )
-
-        # -------------------------------------------------
-        # Roster groups
-        # -------------------------------------------------
-
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS roster_groups (
-                group_key TEXT PRIMARY KEY,
-                display_name TEXT NOT NULL,
-                category TEXT NOT NULL,
-                catechists TEXT NOT NULL DEFAULT '',
-                classroom TEXT NOT NULL DEFAULT ''
-            );
-            """
-        )
-
-        # -------------------------------------------------
-        # Roster group migrations
-        # -------------------------------------------------
-
-        conn.execute(
-            """
-            ALTER TABLE roster_groups
-            ADD COLUMN IF NOT EXISTS
-                classroom TEXT NOT NULL DEFAULT '';
-            """
-        )
-
-        # -------------------------------------------------
-        # Seed standard roster groups
-        # -------------------------------------------------
-
-        roster_groups = [
-            (
-                "kindergarten",
-                "Pre-K / Kindergarten",
-                "PSR",
-            ),
-            (
-                "grade_1",
-                "Grade 1",
-                "PSR",
-            ),
-            (
-                "grade_2",
-                "Grade 2",
-                "PSR",
-            ),
-            (
-                "grade_3",
-                "Grade 3",
-                "PSR",
-            ),
-            (
-                "grade_4",
-                "Grade 4",
-                "PSR",
-            ),
-            (
-                "grade_5",
-                "Grade 5",
-                "PSR",
-            ),
-            (
-                "edge",
-                "EDGE",
-                "Youth Ministry",
-            ),
-            (
-                "life_teen",
-                "Life Teen",
-                "Youth Ministry",
-            ),
-        ]
-
-        with conn.cursor() as cursor:
-
-            cursor.executemany(
-                """
-                INSERT INTO roster_groups (
-                    group_key,
-                    display_name,
-                    category,
-                    catechists,
-                    classroom
-                )
-                VALUES (%s, %s, %s, '', '')
-                ON CONFLICT (group_key)
-                DO NOTHING;
-                """,
-                roster_groups,
-            )
-        # -------------------------------------------------
-        # Normalize standard roster display names
-        # -------------------------------------------------
-
-        conn.execute(
-            """
-            UPDATE roster_groups
-            SET display_name = 'Pre-K / Kindergarten'
-            WHERE group_key = 'kindergarten'
-              AND display_name = 'Kindergarten';
-            """
-        )
-
 
 # ---------------------------------------------------------
 # Household reference generator
@@ -2985,114 +2808,9 @@ def get_roster_groups() -> list[dict]:
 
     return groups
 
-
 # ---------------------------------------------------------
-# Update roster catechists
+# Update roster group details
 # ---------------------------------------------------------
-
-def update_roster_group_catechists(
-    group_key: str,
-    catechists: str,
-) -> None:
-    """
-    Update the editable catechist names
-    for one roster group.
-
-    Example:
-        Jane Smith, John Doe
-    """
-
-    group_key = (
-        group_key
-        .strip()
-        .lower()
-    )
-
-    catechists = (
-        catechists
-        .strip()
-    )
-
-    if not group_key:
-
-        raise ValueError(
-            "Roster group cannot be empty."
-        )
-
-    with _connect() as conn:
-
-        cursor = conn.execute(
-            """
-            UPDATE roster_groups
-            SET catechists = %s
-            WHERE group_key = %s;
-            """,
-            (
-                catechists,
-                group_key,
-            ),
-        )
-
-        if cursor.rowcount == 0:
-
-            raise ValueError(
-                f"Unknown roster group: "
-                f"{group_key}"
-            )
-
-
-# ---------------------------------------------------------
-# Update roster classroom
-# ---------------------------------------------------------
-
-def update_roster_group_classroom(
-    group_key: str,
-    classroom: str,
-) -> None:
-    """
-    Update the classroom assigned to one roster group.
-
-    Example:
-        Room 1 - St. Monica
-    """
-
-    group_key = (
-        group_key
-        .strip()
-        .lower()
-    )
-
-    classroom = (
-        classroom
-        .strip()
-    )
-
-    if not group_key:
-
-        raise ValueError(
-            "Roster group cannot be empty."
-        )
-
-    with _connect() as conn:
-
-        cursor = conn.execute(
-            """
-            UPDATE roster_groups
-            SET classroom = %s
-            WHERE group_key = %s;
-            """,
-            (
-                classroom,
-                group_key,
-            ),
-        )
-
-        if cursor.rowcount == 0:
-
-            raise ValueError(
-                f"Unknown roster group: "
-                f"{group_key}"
-            )
 
 def update_roster_group_details(
     group_key: str,

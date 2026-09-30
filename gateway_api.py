@@ -8,6 +8,7 @@ from pydantic import BaseModel
 import streamlit as st
 
 from db import (
+    claim_next_requested_dispatch_recipient,
     claim_next_queued_recipient,
     claim_next_queued_recipient_for_message,
     claim_next_queued_test_recipient,
@@ -136,6 +137,28 @@ def health() -> dict:
 )
 def gateway_summary() -> dict:
     return get_gateway_queue_summary()
+
+
+@app.post(
+    "/gateway/dispatch-next",
+    dependencies=[
+        Depends(
+            require_gateway_token
+        )
+    ],
+)
+def dispatch_next() -> dict:
+    """
+    Return the first recipient of the next real household message
+    that was explicitly approved for automatic dispatch in the web app.
+
+    A merely queued/manual message is not eligible here.
+    """
+
+    return {
+        "recipient":
+            claim_next_requested_dispatch_recipient(),
+    }
 
 
 @app.post(

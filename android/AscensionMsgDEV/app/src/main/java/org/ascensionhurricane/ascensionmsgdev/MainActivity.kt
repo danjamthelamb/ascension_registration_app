@@ -63,6 +63,7 @@ import java.net.URL
 import java.util.UUID
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
+import kotlinx.coroutines.delay
 
 
 const val EXTRA_SEND_ID =
@@ -486,6 +487,10 @@ fun MessengerScreen(
     }
 
     val batchStopSignal = remember {
+        AtomicBoolean(false)
+    }
+
+    val dispatchPollInFlight = remember {
         AtomicBoolean(false)
     }
 
@@ -1119,25 +1124,18 @@ fun MessengerScreen(
     }
 
 
-    fun startHouseholdBatchNow() {
-
-        val firstItem =
-            currentFetchedItem()
-                ?: run {
-                    gatewayStatus =
-                        "Fetch and review one claimed household before starting a batch."
-                    return
-                }
+    fun startHouseholdBatchFromItem(
+        firstItem: GatewayClaimedItem,
+    ) {
 
         if (
             firstItem.isTest
-            || fetchedSendState != "claimed"
             || firstItem.phone.isBlank()
             || firstItem.messageText.isBlank()
             || firstItem.claimToken.isBlank()
         ) {
             gatewayStatus =
-                "Fetch and review one claimed household before starting a batch."
+                "The claimed household is not safe to start as a batch."
             return
         }
 
@@ -1567,6 +1565,237 @@ fun MessengerScreen(
                                 ?: "Unknown error"
                         }. Verify Streamlit before continuing."
                 }
+            }
+
+        }.start()
+    }
+
+
+    fun startHouseholdBatchNow() {
+
+        val firstItem =
+            currentFetchedItem()
+                ?: run {
+                    gatewayStatus =
+                        "Fetch and review one claimed household before starting a batch."
+                    return
+                }
+
+        if (
+            fetchedSendState != "claimed"
+            || firstItem.isTest
+        ) {
+            gatewayStatus =
+                "Fetch and review one claimed household before starting a batch."
+            return
+        }
+
+        startHouseholdBatchFromItem(
+            firstItem
+        )
+    }
+
+
+    fun pollForAutomaticDispatchNow() {
+
+        if (
+            !dispatchPollInFlight.compareAndSet(
+                false,
+                true,
+            )
+        ) {
+            return
+        }
+
+        if (
+            batchRunning
+            || (
+                fetchedRecipientId != null
+                && fetchedSendState in listOf(
+                    "claimed",
+                    "cancelling",
+                    "cancel_unknown",
+                    "releasing",
+                    "release_unknown",
+                    "sending",
+                    "handed_off",
+                )
+            )
+        ) {
+            dispatchPollInFlight.set(
+                false
+            )
+            return
+        }
+
+        val cleanBaseUrl =
+            gatewayUrl
+                .trim()
+                .trimEnd('/')
+
+        val cleanToken =
+            gatewayToken.trim()
+
+        if (
+            cleanBaseUrl.isBlank()
+            || cleanToken.isBlank()
+        ) {
+            dispatchPollInFlight.set(
+                false
+            )
+            return
+        }
+
+        Thread {
+
+            try {
+
+                val url =
+                    URL(
+                        "$cleanBaseUrl/gateway/dispatch-next"
+                    )
+
+                val connection =
+                    url.openConnection()
+                            as HttpURLConnection
+
+                try {
+                    connection.requestMethod =
+                        "POST"
+
+                    connection.setRequestProperty(
+                        "Authorization",
+                        "Bearer $cleanToken",
+                    )
+
+                    connection.setRequestProperty(
+                        "Content-Type",
+                        "application/json",
+                    )
+
+                    connection.connectTimeout =
+                        3500
+
+                    connection.readTimeout =
+                        3500
+
+                    connection.doOutput =
+                        true
+
+                    connection
+                        .outputStream
+                        .use {
+                            it.write(
+                                "{}"
+                                    .toByteArray(
+                                        Charsets.UTF_8
+                                    )
+                            )
+                        }
+
+                    val responseCode =
+                        connection.responseCode
+
+                    val responseBody =
+                        if (
+                            responseCode in 200..299
+                        ) {
+                            connection
+                                .inputStream
+                                .bufferedReader()
+                                .use {
+                                    it.readText()
+                                }
+                        } else {
+                            connection
+                                .errorStream
+                                ?.bufferedReader()
+                                ?.use {
+                                    it.readText()
+                                }
+                                ?: ""
+                        }
+
+                    if (
+                        responseCode !in 200..299
+                    ) {
+                        runOnUi {
+                            gatewayStatus =
+                                "Automatic dispatch check returned HTTP $responseCode."
+                        }
+                        return@Thread
+                    }
+
+                    val root =
+                        JSONObject(
+                            responseBody
+                        )
+
+                    if (
+                        root.isNull(
+                            "recipient"
+                        )
+                    ) {
+                        return@Thread
+                    }
+
+                    val item =
+                        parseClaimedItem(
+                            root.getJSONObject(
+                                "recipient"
+                            )
+                        )
+
+                    runOnUi {
+
+                        clearFetchedItem()
+                        applyFetchedItem(
+                            item
+                        )
+
+                        val hasSmsPermission =
+                            ContextCompat
+                                .checkSelfPermission(
+                                    context,
+                                    Manifest.permission.SEND_SMS
+                                ) ==
+                                PackageManager.PERMISSION_GRANTED
+
+                        if (
+                            hasSmsPermission
+                        ) {
+                            gatewayStatus =
+                                "Message #${item.messageId} was approved in Streamlit. Starting automatically."
+
+                            startHouseholdBatchFromItem(
+                                item
+                            )
+
+                        } else {
+                            gatewayStatus =
+                                "Message #${item.messageId} was approved and claimed, but SMS permission is required before it can start."
+                        }
+                    }
+
+                } finally {
+                    connection.disconnect()
+                }
+
+            } catch (
+                exception: Exception
+            ) {
+                runOnUi {
+                    gatewayStatus =
+                        "Automatic dispatch check failed: ${
+                            exception.message
+                                ?: "Unknown error"
+                        }"
+                }
+
+            } finally {
+                dispatchPollInFlight.set(
+                    false
+                )
             }
 
         }.start()
@@ -2742,6 +2971,31 @@ fun MessengerScreen(
         !batchRunning
         && !claimLocked
 
+    LaunchedEffect(
+        gatewayConfigured,
+        gatewayUrl,
+        gatewayToken,
+        batchRunning,
+        claimLocked,
+    ) {
+        while (
+            true
+        ) {
+            if (
+                gatewayConfigured
+                && !batchRunning
+                && !claimLocked
+                && hasLocalNetworkPermission()
+            ) {
+                pollForAutomaticDispatchNow()
+            }
+
+            delay(
+                2500L
+            )
+        }
+    }
+
     val batchProcessed =
         batchSubmitted
         + batchSent
@@ -3482,7 +3736,7 @@ fun MessengerScreen(
 
 
         // -------------------------------------------------
-        // Main household queue
+        // Automatic household dispatch
         // -------------------------------------------------
 
         Card(
@@ -3508,110 +3762,106 @@ fun MessengerScreen(
                     )
             ) {
 
-                Text(
-                    text =
-                        "Household Queue",
-                    style =
-                        MaterialTheme
-                            .typography
-                            .titleLarge,
-                    fontWeight =
-                        FontWeight.Bold,
-                )
+                Row(
+                    modifier =
+                        Modifier.fillMaxWidth(),
+                    horizontalArrangement =
+                        Arrangement.SpaceBetween,
+                    verticalAlignment =
+                        Alignment.CenterVertically,
+                ) {
+
+                    Column(
+                        modifier =
+                            Modifier.weight(
+                                1f
+                            )
+                    ) {
+                        Text(
+                            text =
+                                "Automatic Delivery",
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .titleLarge,
+                            fontWeight =
+                                FontWeight.Bold,
+                        )
+
+                        Spacer(
+                            modifier =
+                                Modifier.height(
+                                    4.dp
+                                )
+                        )
+
+                        Text(
+                            text =
+                                if (
+                                    batchRunning
+                                ) {
+                                    "The approved message is being sent one household at a time."
+                                } else if (
+                                    gatewayConfigured
+                                ) {
+                                    "Listening for messages you approve in ascensionhurricane.org. Keep this app open while sending."
+                                } else {
+                                    "Configure the gateway above before automatic delivery can listen for messages."
+                                },
+                            style =
+                                MaterialTheme
+                                    .typography
+                                    .bodyMedium,
+                            color =
+                                MaterialTheme
+                                    .colorScheme
+                                    .onSurfaceVariant,
+                        )
+                    }
+
+                    MessengerStatusBadge(
+                        label =
+                            if (
+                                batchRunning
+                            ) {
+                                "Sending"
+                            } else if (
+                                gatewayConfigured
+                            ) {
+                                "Listening"
+                            } else {
+                                "Setup"
+                            },
+                        state =
+                            if (
+                                batchRunning
+                            ) {
+                                "submitted"
+                            } else {
+                                "queued"
+                            },
+                    )
+                }
 
                 Spacer(
                     modifier =
                         Modifier.height(
-                            4.dp
+                            12.dp
                         )
                 )
 
                 Text(
                     text =
-                        when {
-                            batchRunning ->
-                                "The current message batch is running one household at a time."
-
-                            fetchedRecipientId != null
-                            && !fetchedIsTest ->
-                                "Review the claimed household below before sending."
-
-                            else ->
-                                "Pull one queued household from Streamlit to review before anything is sent."
-                        },
+                        "Only messages explicitly approved with Send in the web app are eligible for automatic dispatch. Old manually queued messages will not start on their own.",
                     style =
                         MaterialTheme
                             .typography
-                            .bodyMedium,
+                            .bodySmall,
                     color =
                         MaterialTheme
                             .colorScheme
                             .onSurfaceVariant,
                 )
-
-                Spacer(
-                    modifier =
-                        Modifier.height(
-                            16.dp
-                        )
-                )
-
-                Button(
-                    onClick = {
-                        requireLocalNetworkThen(
-                            action = "fetch_household",
-                            block = {
-                                fetchNextQueuedHouseholdNow()
-                            },
-                        )
-                    },
-                    enabled =
-                        canFetch
-                        && gatewayConfigured,
-                    modifier =
-                        Modifier.fillMaxWidth(),
-                ) {
-                    Text(
-                        if (
-                            fetchedRecipientId != null
-                            && !fetchedIsTest
-                            && fetchedSendState in listOf(
-                                "sent",
-                                "submitted",
-                                "failed",
-                                "released",
-                            )
-                        ) {
-                            "Review Next Household"
-                        } else {
-                            "Review Next Household"
-                        }
-                    )
-                }
-
-                if (
-                    !gatewayConfigured
-                ) {
-                    Spacer(
-                        modifier =
-                            Modifier.height(
-                                8.dp
-                            )
-                    )
-
-                    Text(
-                        text =
-                            "Set the gateway URL and token above before pulling a household.",
-                        style =
-                            MaterialTheme
-                                .typography
-                                .bodySmall,
-                        color =
-                            MaterialTheme
-                                .colorScheme
-                                .onSurfaceVariant,
-                    )
-                }
             }
         }
 
@@ -4170,6 +4420,41 @@ fun MessengerScreen(
                 modifier =
                     Modifier.height(
                         8.dp
+                    )
+            )
+
+            MessengerSectionCard(
+                title =
+                    "Manual Household Queue",
+                subtitle =
+                    "Fallback only. Automatic dispatch normally starts approved web messages without this button.",
+            ) {
+
+                Button(
+                    onClick = {
+                        requireLocalNetworkThen(
+                            action = "fetch_household",
+                            block = {
+                                fetchNextQueuedHouseholdNow()
+                            },
+                        )
+                    },
+                    enabled =
+                        canFetch
+                        && gatewayConfigured,
+                    modifier =
+                        Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        "Review Next Manually Queued Household"
+                    )
+                }
+            }
+
+            Spacer(
+                modifier =
+                    Modifier.height(
+                        12.dp
                     )
             )
 

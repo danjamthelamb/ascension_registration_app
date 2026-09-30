@@ -387,6 +387,9 @@ def init_db() -> None:
 
                 request_key TEXT,
 
+                dispatch_requested_at TIMESTAMPTZ,
+                dispatch_claimed_at TIMESTAMPTZ,
+
                 CONSTRAINT chk_messages_status
                     CHECK (
                         status IN (
@@ -544,6 +547,48 @@ def init_db() -> None:
             ON messages (request_key)
             WHERE is_test = TRUE
               AND request_key IS NOT NULL;
+            """
+        )
+
+
+        conn.execute(
+            """
+            ALTER TABLE messages
+            ADD COLUMN IF NOT EXISTS
+                dispatch_requested_at TIMESTAMPTZ;
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE messages
+            ADD COLUMN IF NOT EXISTS
+                dispatch_claimed_at TIMESTAMPTZ;
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS
+                uq_messages_real_request_key
+            ON messages (request_key)
+            WHERE is_test = FALSE
+              AND request_key IS NOT NULL;
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_messages_dispatch_queue
+            ON messages (
+                dispatch_requested_at,
+                dispatch_claimed_at,
+                message_id
+            )
+            WHERE is_test = FALSE
+              AND status = 'queued'
+              AND dispatch_requested_at IS NOT NULL;
             """
         )
 
@@ -2694,6 +2739,275 @@ def create_message_draft(
     return message_id
 
 
+
+
+def create_queued_message_for_dispatch(
+    created_by: str,
+    message_text: str,
+    audiences: list[str],
+    recipients: list[dict],
+    request_key: str,
+) -> int:
+    """
+    Create a real household message, snapshot its recipients,
+    queue every recipient, and explicitly request automatic
+    dispatch by the Pixel -- all in one transaction.
+
+    request_key makes the Send action idempotent. If Streamlit
+    reruns or the user taps Send twice for the same preview,
+    the existing message ID is returned instead of creating a
+    duplicate campaign.
+    """
+
+    created_by = created_by.strip().lower()
+    message_text = message_text.strip()
+    request_key = request_key.strip()
+
+    audiences = [
+        str(audience).strip()
+        for audience in audiences
+        if str(audience).strip()
+    ]
+
+    if not created_by:
+        raise ValueError(
+            "Message creator cannot be empty."
+        )
+
+    if not message_text:
+        raise ValueError(
+            "Message text cannot be empty."
+        )
+
+    if not audiences:
+        raise ValueError(
+            "At least one audience must be selected."
+        )
+
+    if not recipients:
+        raise ValueError(
+            "At least one recipient is required."
+        )
+
+    if not request_key:
+        raise ValueError(
+            "Message send request key cannot be empty."
+        )
+
+    seen_households = set()
+    normalized_recipients = []
+
+    for recipient in recipients:
+
+        household_reference = str(
+            recipient.get(
+                "Household ID",
+                "",
+            )
+            or ""
+        ).strip()
+
+        contact_name = str(
+            recipient.get(
+                "Contact",
+                "",
+            )
+            or ""
+        ).strip()
+
+        phone = str(
+            recipient.get(
+                "Phone",
+                "",
+            )
+            or ""
+        ).strip()
+
+        contact_source = str(
+            recipient.get(
+                "Using",
+                "",
+            )
+            or ""
+        ).strip()
+
+        children = str(
+            recipient.get(
+                "Children",
+                "",
+            )
+            or ""
+        ).strip()
+
+        if not household_reference:
+            raise ValueError(
+                "Recipient Household ID cannot be empty."
+            )
+
+        if household_reference in seen_households:
+            raise ValueError(
+                "A household may only appear once in a message."
+            )
+
+        if not contact_name:
+            raise ValueError(
+                f"Recipient contact name is missing for "
+                f"{household_reference}."
+            )
+
+        if not phone:
+            raise ValueError(
+                f"Recipient phone is missing for "
+                f"{household_reference}."
+            )
+
+        if not contact_source:
+            raise ValueError(
+                f"Recipient contact source is missing for "
+                f"{household_reference}."
+            )
+
+        seen_households.add(
+            household_reference
+        )
+
+        normalized_recipients.append(
+            (
+                household_reference,
+                contact_name,
+                phone,
+                contact_source,
+                children,
+            )
+        )
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    with _connect() as conn:
+
+        existing = conn.execute(
+            """
+            SELECT message_id
+            FROM messages
+            WHERE is_test = FALSE
+              AND request_key = %s
+            LIMIT 1;
+            """,
+            (
+                request_key,
+            ),
+        ).fetchone()
+
+        if existing is not None:
+            return existing[
+                "message_id"
+            ]
+
+        message_row = conn.execute(
+            """
+            INSERT INTO messages (
+                created_by,
+                message_text,
+                audiences,
+                status,
+                is_test,
+                request_key,
+                dispatch_requested_at,
+                dispatch_claimed_at
+            )
+            VALUES (
+                %s,
+                %s,
+                %s,
+                'queued',
+                FALSE,
+                %s,
+                %s,
+                NULL
+            )
+            ON CONFLICT DO NOTHING
+            RETURNING message_id;
+            """,
+            (
+                created_by,
+                message_text,
+                audiences,
+                request_key,
+                now,
+            ),
+        ).fetchone()
+
+        if message_row is None:
+
+            existing = conn.execute(
+                """
+                SELECT message_id
+                FROM messages
+                WHERE is_test = FALSE
+                  AND request_key = %s
+                LIMIT 1;
+                """,
+                (
+                    request_key,
+                ),
+            ).fetchone()
+
+            if existing is None:
+                raise RuntimeError(
+                    "Message could not be created or recovered."
+                )
+
+            return existing[
+                "message_id"
+            ]
+
+        message_id = message_row[
+            "message_id"
+        ]
+
+        for (
+            household_reference,
+            contact_name,
+            phone,
+            contact_source,
+            children,
+        ) in normalized_recipients:
+
+            conn.execute(
+                """
+                INSERT INTO message_recipients (
+                    message_id,
+                    household_reference,
+                    contact_name,
+                    phone,
+                    contact_source,
+                    children,
+                    status
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    'queued'
+                );
+                """,
+                (
+                    message_id,
+                    household_reference,
+                    contact_name,
+                    phone,
+                    contact_source,
+                    children,
+                ),
+            )
+
+    return message_id
+
 def get_message_history(
     limit: int = 50,
 ) -> list[dict]:
@@ -3560,6 +3874,167 @@ def claim_next_queued_recipient_for_message(
         result["claimed_at"] = now
         return result
 
+
+
+
+def claim_next_requested_dispatch_recipient() -> dict | None:
+    """
+    Atomically claim the first recipient of the next real message
+    that was explicitly approved for automatic dispatch in the
+    Streamlit admin app.
+
+    Merely being QUEUED is not enough. A message must have
+    dispatch_requested_at set, which prevents old/manual queued
+    messages from unexpectedly sending themselves.
+
+    dispatch_claimed_at is intentionally never auto-expired. If a
+    Pixel disappears after claiming an automatic dispatch, the
+    campaign stays stopped rather than risking a duplicate send.
+    """
+
+    recipient_claim_token = (
+        secrets.token_urlsafe(
+            32
+        )
+    )
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    with _connect() as conn:
+
+        message = conn.execute(
+            """
+            SELECT
+                m.message_id,
+                m.dispatch_requested_at
+            FROM messages AS m
+            WHERE m.status = 'queued'
+              AND m.is_test = FALSE
+              AND m.dispatch_requested_at IS NOT NULL
+              AND m.dispatch_claimed_at IS NULL
+              AND EXISTS (
+                    SELECT 1
+                    FROM message_recipients AS queued_recipient
+                    WHERE queued_recipient.message_id = m.message_id
+                      AND queued_recipient.status = 'queued'
+              )
+              AND NOT EXISTS (
+                    SELECT 1
+                    FROM message_recipients AS claimed_recipient
+                    WHERE claimed_recipient.message_id = m.message_id
+                      AND claimed_recipient.status = 'claimed'
+              )
+            ORDER BY
+                m.dispatch_requested_at,
+                m.message_id
+            FOR UPDATE OF m
+            SKIP LOCKED
+            LIMIT 1;
+            """
+        ).fetchone()
+
+        if message is None:
+            return None
+
+        message_id = message[
+            "message_id"
+        ]
+
+        row = conn.execute(
+            """
+            SELECT
+                mr.recipient_id,
+                mr.message_id,
+                mr.household_reference,
+                mr.contact_name,
+                mr.phone,
+                mr.contact_source,
+                mr.children,
+                m.message_text,
+                m.audiences,
+                m.is_test
+            FROM message_recipients AS mr
+            INNER JOIN messages AS m
+                ON m.message_id = mr.message_id
+            WHERE mr.message_id = %s
+              AND mr.status = 'queued'
+              AND m.status = 'queued'
+              AND m.is_test = FALSE
+            ORDER BY mr.recipient_id
+            FOR UPDATE OF mr
+            SKIP LOCKED
+            LIMIT 1;
+            """,
+            (
+                message_id,
+            ),
+        ).fetchone()
+
+        if row is None:
+            return None
+
+        recipient_id = row[
+            "recipient_id"
+        ]
+
+        message_cursor = conn.execute(
+            """
+            UPDATE messages
+            SET dispatch_claimed_at = %s
+            WHERE message_id = %s
+              AND dispatch_claimed_at IS NULL;
+            """,
+            (
+                now,
+                message_id,
+            ),
+        )
+
+        if message_cursor.rowcount != 1:
+            return None
+
+        recipient_cursor = conn.execute(
+            """
+            UPDATE message_recipients
+            SET
+                status = 'claimed',
+                claimed_at = %s,
+                claim_token = %s
+            WHERE recipient_id = %s
+              AND status = 'queued';
+            """,
+            (
+                now,
+                recipient_claim_token,
+                recipient_id,
+            ),
+        )
+
+        if recipient_cursor.rowcount != 1:
+            raise RuntimeError(
+                "Automatic dispatch was claimed, but its first "
+                "recipient could not be reserved."
+            )
+
+        result = dict(
+            row
+        )
+
+        result[
+            "claim_token"
+        ] = recipient_claim_token
+
+        result[
+            "claimed_at"
+        ] = now
+
+        result[
+            "auto_dispatch"
+        ] = True
+
+        return result
 
 def get_gateway_recipient_status(
     recipient_id: int,

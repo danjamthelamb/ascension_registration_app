@@ -218,6 +218,24 @@ def init_db() -> None:
                 idx_children_household_id
             ON children (household_id);
             """
+        ) 
+
+        # -------------------------------------------------
+        # Annual child fields now live in yearly_enrollments
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            ALTER TABLE children
+            ALTER COLUMN grade DROP NOT NULL;
+            """
+        )
+
+        conn.execute(
+            """
+            ALTER TABLE children
+            ALTER COLUMN school DROP NOT NULL;
+            """
         )
 
         # -------------------------------------------------
@@ -267,6 +285,46 @@ def init_db() -> None:
                 (status)
             )
             WHERE status = 'active';
+            """
+        )
+
+        # -------------------------------------------------
+        # Classes
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS classes (
+                class_id BIGSERIAL PRIMARY KEY,
+
+                year_id BIGINT NOT NULL,
+
+                group_key TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                category TEXT NOT NULL,
+
+                catechists TEXT NOT NULL DEFAULT '',
+                classroom TEXT NOT NULL DEFAULT '',
+
+                created_at TIMESTAMPTZ NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP,
+
+                CONSTRAINT fk_classes_year
+                    FOREIGN KEY (year_id)
+                    REFERENCES catechetical_years (year_id)
+                    ON DELETE RESTRICT,
+
+                CONSTRAINT uq_class_year_group
+                    UNIQUE (year_id, group_key)
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_classes_year_id
+            ON classes (year_id);
             """
         )
 
@@ -321,6 +379,50 @@ def init_db() -> None:
                         )
                     )
             );
+            """
+        )
+
+        # -------------------------------------------------
+        # Yearly enrollment class migration
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            ALTER TABLE yearly_enrollments
+            ADD COLUMN IF NOT EXISTS
+                class_id BIGINT;
+            """
+        )
+
+        conn.execute(
+            """
+            DO $$
+            BEGIN
+                IF NOT EXISTS (
+                    SELECT 1
+                    FROM pg_constraint
+                    WHERE conname =
+                        'fk_yearly_enrollment_class'
+                ) THEN
+
+                    ALTER TABLE yearly_enrollments
+                    ADD CONSTRAINT
+                        fk_yearly_enrollment_class
+                    FOREIGN KEY (class_id)
+                    REFERENCES classes (class_id)
+                    ON DELETE RESTRICT;
+
+                END IF;
+            END
+            $$;
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_yearly_enrollments_class_id
+            ON yearly_enrollments (class_id);
             """
         )
 
@@ -514,7 +616,7 @@ def init_db() -> None:
         roster_groups = [
             (
                 "kindergarten",
-                "Kindergarten",
+                "Pre-K / Kindergarten",
                 "PSR",
             ),
             (
@@ -571,6 +673,18 @@ def init_db() -> None:
                 """,
                 roster_groups,
             )
+        # -------------------------------------------------
+        # Normalize standard roster display names
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            UPDATE roster_groups
+            SET display_name = 'Pre-K / Kindergarten'
+            WHERE group_key = 'kindergarten'
+              AND display_name = 'Kindergarten';
+            """
+        )
 
 
 # ---------------------------------------------------------
@@ -1549,42 +1663,54 @@ def save_registration(
             "household_id"
         ]
 
+        # -------------------------------------------------
+        # Active catechetical year
+        # -------------------------------------------------
+
+        active_year = conn.execute(
+            """
+            SELECT year_id
+            FROM catechetical_years
+            WHERE status = 'active';
+            """
+        ).fetchone()
+
+        if active_year is None:
+            raise ValueError(
+                "No active catechetical year was found."
+            )
+
+        active_year_id = active_year[
+            "year_id"
+        ]
+
+        # -------------------------------------------------
+        # Create children and yearly enrollments
+        # -------------------------------------------------
+
         for child in children:
 
-            conn.execute(
+            # ---------------------------------------------
+            # Create permanent child record
+            # ---------------------------------------------
+
+            child_row = conn.execute(
                 """
                 INSERT INTO children (
                     household_id,
-
                     first_name,
                     middle_name,
                     last_name,
-
-                    date_of_birth,
-                    grade,
-                    school,
-
-                    receiving_first_communion_reconciliation,
-                    receiving_confirmation,
-
-                    baptism_status,
-                    first_reconciliation_status,
-                    first_communion_status
+                    date_of_birth
                 )
                 VALUES (
                     %s,
                     %s,
                     %s,
                     %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
-                    %s,
                     %s
-                );
+                )
+                RETURNING child_id;
                 """,
                 (
                     household_id,
@@ -1605,10 +1731,177 @@ def save_registration(
                     child[
                         "date_of_birth"
                     ],
+                ),
+            ).fetchone()
 
-                    child[
-                        "grade"
-                    ],
+            child_id = child_row[
+                "child_id"
+            ]
+
+            # ---------------------------------------------
+            # Create permanent sacramental history
+            # ---------------------------------------------
+
+            sacrament_statuses = {
+                "Baptism":
+                    child.get(
+                        "baptism_status"
+                    ),
+
+                "First Reconciliation":
+                    child.get(
+                        "first_reconciliation_status"
+                    ),
+
+                "First Communion":
+                    child.get(
+                        "first_communion_status"
+                    ),
+            }
+
+            for (
+                sacrament,
+                status,
+            ) in sacrament_statuses.items():
+
+                if status == "Yes":
+
+                    conn.execute(
+                        """
+                        INSERT INTO child_sacraments (
+                            child_id,
+                            sacrament,
+                            received
+                        )
+                        VALUES (
+                            %s,
+                            %s,
+                            TRUE
+                        )
+                        ON CONFLICT (
+                            child_id,
+                            sacrament
+                        )
+                        DO UPDATE
+                        SET received = TRUE;
+                        """,
+                        (
+                            child_id,
+                            sacrament,
+                        ),
+                    )
+
+            # ---------------------------------------------
+            # Determine class from grade
+            # ---------------------------------------------
+
+            grade = child[
+                "grade"
+            ]
+
+            if grade in (
+                "Pre-K",
+                "K",
+            ):
+                group_key = (
+                    "kindergarten"
+                )
+
+            elif grade in (
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+            ):
+                group_key = (
+                    f"grade_{grade}"
+                )
+
+            elif grade in (
+                "6",
+                "7",
+                "8",
+            ):
+                group_key = (
+                    "edge"
+                )
+
+            elif grade in (
+                "9",
+                "10",
+                "11",
+                "12",
+            ):
+                group_key = (
+                    "life_teen"
+                )
+
+            else:
+                raise ValueError(
+                    f"Invalid grade: {grade}"
+                )
+
+            class_row = conn.execute(
+                """
+                SELECT class_id
+                FROM classes
+                WHERE year_id = %s
+                  AND group_key = %s;
+                """,
+                (
+                    active_year_id,
+                    group_key,
+                ),
+            ).fetchone()
+
+            if class_row is None:
+                raise ValueError(
+                    "The class for this child's grade "
+                    "could not be found."
+                )
+
+            class_id = class_row[
+                "class_id"
+            ]
+
+            # ---------------------------------------------
+            # Create active-year enrollment
+            # ---------------------------------------------
+
+            conn.execute(
+                """
+                INSERT INTO yearly_enrollments (
+                    child_id,
+                    year_id,
+                    class_id,
+
+                    grade,
+                    school,
+                    school_verified,
+                    enrollment_status,
+
+                    receiving_first_communion_reconciliation,
+                    receiving_confirmation
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    %s,
+                    TRUE,
+                    'enrolled',
+                    %s,
+                    %s
+                );
+                """,
+                (
+                    child_id,
+                    active_year_id,
+                    class_id,
+
+                    grade,
 
                     child[
                         "school"
@@ -1627,18 +1920,6 @@ def save_registration(
                             False,
                         )
                     ),
-
-                    child.get(
-                        "baptism_status"
-                    ),
-
-                    child.get(
-                        "first_reconciliation_status"
-                    ),
-
-                    child.get(
-                        "first_communion_status"
-                    ),
                 ),
             )
 
@@ -1656,11 +1937,14 @@ def get_registration_by_reference(
     household_reference: str,
 ) -> tuple[dict, list[dict]] | None:
     """
-    Load a household and all children using
-    the public Household ID.
+    Load a household and its children using the public
+    Household ID.
 
-    app.py should only call this after the
-    household has passed email verification.
+    Annual registration fields are loaded from the
+    child's enrollment in the active catechetical year.
+
+    app.py should only call this after the household
+    has passed email verification.
     """
 
     household_reference = (
@@ -1683,15 +1967,73 @@ def get_registration_by_reference(
         ).fetchone()
 
         if household is None:
-
             return None
 
         child_rows = conn.execute(
             """
-            SELECT *
-            FROM children
-            WHERE household_id = %s
-            ORDER BY child_id;
+            SELECT
+                c.child_id,
+                c.household_id,
+
+                c.first_name,
+                c.middle_name,
+                c.last_name,
+                c.date_of_birth,
+
+                ye.grade,
+                ye.school,
+                ye.receiving_first_communion_reconciliation,
+                ye.receiving_confirmation,
+
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM child_sacraments AS cs
+                        WHERE cs.child_id = c.child_id
+                          AND cs.sacrament = 'Baptism'
+                          AND cs.received = TRUE
+                    )
+                    THEN 'Yes'
+                    ELSE NULL
+                END AS baptism_status,
+
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM child_sacraments AS cs
+                        WHERE cs.child_id = c.child_id
+                          AND cs.sacrament = 'First Reconciliation'
+                          AND cs.received = TRUE
+                    )
+                    THEN 'Yes'
+                    ELSE NULL
+                END AS first_reconciliation_status,
+
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM child_sacraments AS cs
+                        WHERE cs.child_id = c.child_id
+                          AND cs.sacrament = 'First Communion'
+                          AND cs.received = TRUE
+                    )
+                    THEN 'Yes'
+                    ELSE NULL
+                END AS first_communion_status
+
+            FROM children AS c
+
+            INNER JOIN yearly_enrollments AS ye
+                ON ye.child_id = c.child_id
+
+            INNER JOIN catechetical_years AS cy
+                ON cy.year_id = ye.year_id
+
+            WHERE c.household_id = %s
+              AND cy.status = 'active'
+              AND ye.enrollment_status = 'enrolled'
+
+            ORDER BY c.child_id;
             """,
             (
                 household[
@@ -1850,63 +2192,85 @@ def update_registration(
         )
 
         # -------------------------------------------------
-        # Existing child IDs
+        # Active catechetical year
+        # -------------------------------------------------
+
+        active_year = conn.execute(
+            """
+            SELECT year_id
+            FROM catechetical_years
+            WHERE status = 'active';
+            """
+        ).fetchone()
+
+        if active_year is None:
+            raise ValueError(
+                "No active catechetical year was found."
+            )
+
+        active_year_id = active_year[
+            "year_id"
+        ]
+
+        # -------------------------------------------------
+        # Children enrolled for the active year
         # -------------------------------------------------
 
         existing_rows = conn.execute(
             """
-            SELECT child_id
-            FROM children
-            WHERE household_id = %s;
+            SELECT ye.child_id
+            FROM yearly_enrollments AS ye
+            INNER JOIN children AS c
+                ON c.child_id = ye.child_id
+            WHERE c.household_id = %s
+              AND ye.year_id = %s
+              AND ye.enrollment_status = 'enrolled';
             """,
             (
                 household_id,
+                active_year_id,
             ),
         ).fetchall()
 
         existing_child_ids = {
-            row[
-                "child_id"
-            ]
+            row["child_id"]
             for row in existing_rows
         }
 
         # -------------------------------------------------
-        # Submitted existing IDs
+        # Submitted existing child IDs
         # -------------------------------------------------
 
         submitted_child_ids = {
-            child[
-                "child_id"
-            ]
+            child["child_id"]
             for child in children
-            if child.get(
-                "child_id"
-            ) is not None
+            if child.get("child_id") is not None
         }
 
         # -------------------------------------------------
-        # Delete removed children
+        # Withdraw removed children from active year
         # -------------------------------------------------
 
-        children_to_delete = (
+        children_to_withdraw = (
             existing_child_ids
             - submitted_child_ids
         )
 
-        for child_id in children_to_delete:
+        for child_id in children_to_withdraw:
 
             conn.execute(
                 """
-                DELETE FROM children
+                UPDATE yearly_enrollments
+                SET enrollment_status = 'withdrawn'
                 WHERE child_id = %s
-                  AND household_id = %s;
+                  AND year_id = %s;
                 """,
                 (
                     child_id,
-                    household_id,
+                    active_year_id,
                 ),
             )
+
 
         # -------------------------------------------------
         # Update existing / insert new children
@@ -1924,25 +2288,18 @@ def update_registration(
 
             if child_id is not None:
 
-                conn.execute(
+                # -----------------------------------------
+                # Update permanent child information
+                # -----------------------------------------
+
+                result = conn.execute(
                     """
                     UPDATE children
                     SET
                         first_name = %s,
                         middle_name = %s,
                         last_name = %s,
-
-                        date_of_birth = %s,
-
-                        grade = %s,
-                        school = %s,
-
-                        receiving_first_communion_reconciliation = %s,
-                        receiving_confirmation = %s,
-
-                        baptism_status = %s,
-                        first_reconciliation_status = %s,
-                        first_communion_status = %s
+                        date_of_birth = %s
 
                     WHERE child_id = %s
                       AND household_id = %s;
@@ -1965,13 +2322,188 @@ def update_registration(
                             "date_of_birth"
                         ],
 
-                        child[
-                            "grade"
-                        ],
+                        child_id,
+                        household_id,
+                    ),
+                )
+
+                if result.rowcount != 1:
+                    raise ValueError(
+                        "The child could not be found "
+                        "in this household."
+                    )
+
+                # -----------------------------------------
+                # Update permanent sacramental history
+                # -----------------------------------------
+
+                sacrament_statuses = {
+                    "Baptism":
+                        child.get(
+                            "baptism_status"
+                        ),
+
+                    "First Reconciliation":
+                        child.get(
+                            "first_reconciliation_status"
+                        ),
+
+                    "First Communion":
+                        child.get(
+                            "first_communion_status"
+                        ),
+                }
+
+                for (
+                    sacrament,
+                    status,
+                ) in sacrament_statuses.items():
+
+                    received = (
+                        status == "Yes"
+                    )
+
+                    if received:
+
+                        conn.execute(
+                            """
+                            INSERT INTO child_sacraments (
+                                child_id,
+                                sacrament,
+                                received
+                            )
+                            VALUES (
+                                %s,
+                                %s,
+                                TRUE
+                            )
+                            ON CONFLICT (
+                                child_id,
+                                sacrament
+                            )
+                            DO UPDATE
+                            SET received = TRUE;
+                            """,
+                            (
+                                child_id,
+                                sacrament,
+                            ),
+                        )
+
+                    else:
+
+                        conn.execute(
+                            """
+                            DELETE FROM child_sacraments
+                            WHERE child_id = %s
+                              AND sacrament = %s;
+                            """,
+                            (
+                                child_id,
+                                sacrament,
+                            ),
+                        )
+
+                # -----------------------------------------
+                # Determine class from grade
+                # -----------------------------------------
+
+                grade = child[
+                    "grade"
+                ]
+
+                if grade in (
+                    "Pre-K",
+                    "K",
+                ):
+                    group_key = (
+                        "kindergarten"
+                    )
+
+                elif grade in (
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                ):
+                    group_key = (
+                        f"grade_{grade}"
+                    )
+
+                elif grade in (
+                    "6",
+                    "7",
+                    "8",
+                ):
+                    group_key = (
+                        "edge"
+                    )
+
+                elif grade in (
+                    "9",
+                    "10",
+                    "11",
+                    "12",
+                ):
+                    group_key = (
+                        "life_teen"
+                    )
+
+                else:
+                    raise ValueError(
+                        f"Invalid grade: {grade}"
+                    )
+
+                class_row = conn.execute(
+                    """
+                    SELECT class_id
+                    FROM classes
+                    WHERE year_id = %s
+                      AND group_key = %s;
+                    """,
+                    (
+                        active_year_id,
+                        group_key,
+                    ),
+                ).fetchone()
+
+                if class_row is None:
+                    raise ValueError(
+                        "The class for this child's grade "
+                        "could not be found."
+                    )
+
+                class_id = class_row[
+                    "class_id"
+                ]
+
+                # -----------------------------------------
+                # Update active-year enrollment
+                # -----------------------------------------
+
+                result = conn.execute(
+                    """
+                    UPDATE yearly_enrollments
+                    SET
+                        grade = %s,
+                        school = %s,
+                        class_id = %s,
+
+                        receiving_first_communion_reconciliation = %s,
+                        receiving_confirmation = %s
+
+                    WHERE child_id = %s
+                      AND year_id = %s;
+                    """,
+                    (
+                        grade,
 
                         child[
                             "school"
                         ],
+
+                        class_id,
 
                         bool(
                             child.get(
@@ -1987,65 +2519,43 @@ def update_registration(
                             )
                         ),
 
-                        child.get(
-                            "baptism_status"
-                        ),
-
-                        child.get(
-                            "first_reconciliation_status"
-                        ),
-
-                        child.get(
-                            "first_communion_status"
-                        ),
-
                         child_id,
-
-                        household_id,
+                        active_year_id,
                     ),
                 )
+
+                if result.rowcount != 1:
+                    raise ValueError(
+                        "The active-year enrollment for "
+                        "this child could not be found."
+                    )
 
             # ---------------------------------------------
             # New child
             # ---------------------------------------------
 
             else:
+                # -----------------------------------------
+                # Create permanent child record
+                # -----------------------------------------
 
-                conn.execute(
+                child_row = conn.execute(
                     """
                     INSERT INTO children (
                         household_id,
-
                         first_name,
                         middle_name,
                         last_name,
-
-                        date_of_birth,
-
-                        grade,
-                        school,
-
-                        receiving_first_communion_reconciliation,
-                        receiving_confirmation,
-
-                        baptism_status,
-                        first_reconciliation_status,
-                        first_communion_status
+                        date_of_birth
                     )
                     VALUES (
                         %s,
                         %s,
                         %s,
                         %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s,
-                        %s,
                         %s
-                    );
+                    )
+                    RETURNING child_id;
                     """,
                     (
                         household_id,
@@ -2066,10 +2576,177 @@ def update_registration(
                         child[
                             "date_of_birth"
                         ],
+                    ),
+                ).fetchone()
 
-                        child[
-                            "grade"
-                        ],
+                child_id = child_row[
+                    "child_id"
+                ]
+
+                # -----------------------------------------
+                # Create permanent sacramental history
+                # -----------------------------------------
+
+                sacrament_statuses = {
+                    "Baptism":
+                        child.get(
+                            "baptism_status"
+                        ),
+
+                    "First Reconciliation":
+                        child.get(
+                            "first_reconciliation_status"
+                        ),
+
+                    "First Communion":
+                        child.get(
+                            "first_communion_status"
+                        ),
+                }
+
+                for (
+                    sacrament,
+                    status,
+                ) in sacrament_statuses.items():
+
+                    if status == "Yes":
+
+                        conn.execute(
+                            """
+                            INSERT INTO child_sacraments (
+                                child_id,
+                                sacrament,
+                                received
+                            )
+                            VALUES (
+                                %s,
+                                %s,
+                                TRUE
+                            )
+                            ON CONFLICT (
+                                child_id,
+                                sacrament
+                            )
+                            DO UPDATE
+                            SET received = TRUE;
+                            """,
+                            (
+                                child_id,
+                                sacrament,
+                            ),
+                        )
+
+                # -----------------------------------------
+                # Determine class from grade
+                # -----------------------------------------
+
+                grade = child[
+                    "grade"
+                ]
+
+                if grade in (
+                    "Pre-K",
+                    "K",
+                ):
+                    group_key = (
+                        "kindergarten"
+                    )
+
+                elif grade in (
+                    "1",
+                    "2",
+                    "3",
+                    "4",
+                    "5",
+                ):
+                    group_key = (
+                        f"grade_{grade}"
+                    )
+
+                elif grade in (
+                    "6",
+                    "7",
+                    "8",
+                ):
+                    group_key = (
+                        "edge"
+                    )
+
+                elif grade in (
+                    "9",
+                    "10",
+                    "11",
+                    "12",
+                ):
+                    group_key = (
+                        "life_teen"
+                    )
+
+                else:
+                    raise ValueError(
+                        f"Invalid grade: {grade}"
+                    )
+
+                class_row = conn.execute(
+                    """
+                    SELECT class_id
+                    FROM classes
+                    WHERE year_id = %s
+                      AND group_key = %s;
+                    """,
+                    (
+                        active_year_id,
+                        group_key,
+                    ),
+                ).fetchone()
+
+                if class_row is None:
+                    raise ValueError(
+                        "The class for this child's grade "
+                        "could not be found."
+                    )
+
+                class_id = class_row[
+                    "class_id"
+                ]
+
+                # -----------------------------------------
+                # Create active-year enrollment
+                # -----------------------------------------
+
+                conn.execute(
+                    """
+                    INSERT INTO yearly_enrollments (
+                        child_id,
+                        year_id,
+                        class_id,
+
+                        grade,
+                        school,
+                        school_verified,
+                        enrollment_status,
+
+                        receiving_first_communion_reconciliation,
+                        receiving_confirmation
+                    )
+                    VALUES (
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        %s,
+                        TRUE,
+                        'enrolled',
+                        %s,
+                        %s
+                    );
+                    """,
+                    (
+                        child_id,
+                        active_year_id,
+                        class_id,
+
+                        grade,
 
                         child[
                             "school"
@@ -2088,18 +2765,6 @@ def update_registration(
                                 False,
                             )
                         ),
-
-                        child.get(
-                            "baptism_status"
-                        ),
-
-                        child.get(
-                            "first_reconciliation_status"
-                        ),
-
-                        child.get(
-                            "first_communion_status"
-                        ),
                     ),
                 )
 
@@ -2110,9 +2775,9 @@ def update_registration(
 
 def get_admin_roster() -> list[dict]:
     """
-    Return all registered children with their
-    associated household information for
-    the administrative dashboard.
+    Return children enrolled in the active catechetical
+    year with their yearly enrollment, class, and
+    household information for the administrative dashboard.
     """
 
     with _connect() as conn:
@@ -2129,15 +2794,60 @@ def get_admin_roster() -> list[dict]:
 
                 c.date_of_birth,
 
-                c.grade,
-                c.school,
+                ye.enrollment_id,
+                ye.year_id,
+                ye.grade,
+                ye.school,
+                ye.school_verified,
+                ye.enrollment_status,
 
-                c.receiving_first_communion_reconciliation,
-                c.receiving_confirmation,
+                ye.receiving_first_communion_reconciliation,
+                ye.receiving_confirmation,
 
-                c.baptism_status,
-                c.first_reconciliation_status,
-                c.first_communion_status,
+                cl.class_id,
+                cl.group_key,
+                cl.display_name AS class_display_name,
+                cl.category AS class_category,
+                cl.catechists,
+                cl.classroom,
+
+                cy.name AS catechetical_year,
+
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM child_sacraments AS cs
+                        WHERE cs.child_id = c.child_id
+                          AND cs.sacrament = 'Baptism'
+                          AND cs.received = TRUE
+                    )
+                    THEN 'Yes'
+                    ELSE NULL
+                END AS baptism_status,
+
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM child_sacraments AS cs
+                        WHERE cs.child_id = c.child_id
+                          AND cs.sacrament = 'First Reconciliation'
+                          AND cs.received = TRUE
+                    )
+                    THEN 'Yes'
+                    ELSE NULL
+                END AS first_reconciliation_status,
+
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM child_sacraments AS cs
+                        WHERE cs.child_id = c.child_id
+                          AND cs.sacrament = 'First Communion'
+                          AND cs.received = TRUE
+                    )
+                    THEN 'Yes'
+                    ELSE NULL
+                END AS first_communion_status,
 
                 h.household_reference,
 
@@ -2162,13 +2872,26 @@ def get_admin_roster() -> list[dict]:
                 h.emergency_contact_relationship,
                 h.emergency_contact_phone
 
-            FROM children AS c
+            FROM yearly_enrollments AS ye
+
+            INNER JOIN catechetical_years AS cy
+                ON ye.year_id = cy.year_id
+
+            INNER JOIN children AS c
+                ON ye.child_id = c.child_id
 
             INNER JOIN households AS h
                 ON c.household_id = h.household_id
 
+            INNER JOIN classes AS cl
+                ON ye.class_id = cl.class_id
+               AND cl.year_id = ye.year_id
+
+            WHERE cy.status = 'active'
+              AND ye.enrollment_status = 'enrolled'
+
             ORDER BY
-                CASE c.grade
+                CASE ye.grade
                     WHEN 'Pre-K' THEN 0
                     WHEN 'K' THEN 1
                     WHEN '1' THEN 2
@@ -2203,9 +2926,8 @@ def get_admin_roster() -> list[dict]:
 
 def get_roster_groups() -> list[dict]:
     """
-    Return the standard PSR and Youth Ministry
-    roster groups including editable catechist
-    names and classroom assignments.
+    Return the roster groups for the active catechetical
+    year, including catechists and classroom assignments.
     """
 
     group_order = [
@@ -2224,29 +2946,44 @@ def get_roster_groups() -> list[dict]:
         rows = conn.execute(
             """
             SELECT
-                group_key,
-                display_name,
-                category,
-                catechists,
-                classroom
-            FROM roster_groups;
+                cl.class_id,
+                cl.year_id,
+                cl.group_key,
+                cl.display_name,
+                cl.category,
+                cl.catechists,
+                cl.classroom,
+                cy.name AS catechetical_year
+
+            FROM classes AS cl
+
+            INNER JOIN catechetical_years AS cy
+                ON cl.year_id = cy.year_id
+
+            WHERE cy.status = 'active';
             """
         ).fetchall()
 
-    groups_by_key = {
-        row[
-            "group_key"
-        ]: dict(row)
+    groups = [
+        dict(row)
         for row in rows
+    ]
+
+    order_lookup = {
+        group_key: index
+        for index, group_key in enumerate(
+            group_order
+        )
     }
 
-    return [
-        groups_by_key[
-            group_key
-        ]
-        for group_key in group_order
-        if group_key in groups_by_key
-    ]
+    groups.sort(
+        key=lambda group: order_lookup.get(
+            group["group_key"],
+            999,
+        )
+    )
+
+    return groups
 
 
 # ---------------------------------------------------------
@@ -2357,51 +3094,50 @@ def update_roster_group_classroom(
                 f"{group_key}"
             )
 
-# ---------------------------------------------------------
-# Update roster details
-# ---------------------------------------------------------
-
 def update_roster_group_details(
     group_key: str,
     catechists: str,
     classroom: str,
 ) -> None:
     """
-    Update the catechists and classroom
-    assigned to one roster group.
+    Update the catechists and classroom for a roster
+    group in the active catechetical year.
     """
 
     group_key = (
         group_key
-        .strip()
-        .lower()
-    )
+        or ""
+    ).strip()
 
     catechists = (
         catechists
-        .strip()
-    )
+        or ""
+    ).strip()
 
     classroom = (
         classroom
-        .strip()
-    )
+        or ""
+    ).strip()
 
     if not group_key:
-
         raise ValueError(
-            "Roster group cannot be empty."
+            "Roster group is required."
         )
 
     with _connect() as conn:
 
-        cursor = conn.execute(
+        result = conn.execute(
             """
-            UPDATE roster_groups
+            UPDATE classes AS cl
             SET
                 catechists = %s,
                 classroom = %s
-            WHERE group_key = %s;
+
+            FROM catechetical_years AS cy
+
+            WHERE cl.year_id = cy.year_id
+              AND cy.status = 'active'
+              AND cl.group_key = %s;
             """,
             (
                 catechists,
@@ -2410,9 +3146,7 @@ def update_roster_group_details(
             ),
         )
 
-        if cursor.rowcount == 0:
-
+        if result.rowcount != 1:
             raise ValueError(
-                f"Unknown roster group: "
-                f"{group_key}"
+                "The active roster group could not be found."
             )

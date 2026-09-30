@@ -43,8 +43,7 @@ from db import (
     init_db,
     save_registration,
     update_registration,
-    update_roster_group_catechists,
-    update_roster_group_classroom,
+    update_roster_group_details,
     verify_admin_code,
     verify_household_code,
 )
@@ -2877,13 +2876,9 @@ def edit_roster_dialog(
 
         try:
 
-            update_roster_group_catechists(
+            update_roster_group_details(
                 group_key,
                 catechists,
-            )
-
-            update_roster_group_classroom(
-                group_key,
                 classroom,
             )
 

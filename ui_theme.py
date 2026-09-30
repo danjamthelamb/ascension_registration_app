@@ -1,5 +1,6 @@
 import streamlit as st
 
+#            --ascension-bg: #F6F2EA;
 
 def inject_theme() -> None:
     st.markdown(
@@ -12,7 +13,7 @@ def inject_theme() -> None:
 
         :root {
             /* Page / surfaces */
-            --ascension-bg: #F6F2EA;
+            --ascension-bg: FFC0DE;
             --ascension-surface: #FFFDFC;
             --ascension-surface-soft: #EFE9DF;
 

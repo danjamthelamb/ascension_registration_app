@@ -13,7 +13,7 @@ def inject_theme() -> None:
 
         :root {
             /* Page / surfaces */
-            --ascension-bg: FFC0DE;
+            --ascension-bg: #FFC0DE;
             --ascension-surface: #FFFDFC;
             --ascension-surface-soft: #EFE9DF;
 

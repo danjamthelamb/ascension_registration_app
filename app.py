@@ -44,6 +44,8 @@ from db import (
     create_household_verification,
     get_admin_roster,
     get_household_references_by_email,
+    get_household_for_renewal,
+    submit_household_renewal,
     get_registration_by_reference,
     get_roster_groups,
     init_db,
@@ -2520,6 +2522,9 @@ if "submitted_household_reference" not in st.session_state:
 if "registration_mode" not in st.session_state:
     st.session_state.registration_mode = None
 
+if "renewal_data" not in st.session_state:
+    st.session_state.renewal_data = None
+
 if "existing_household_id" not in st.session_state:
     st.session_state.existing_household_id = None
 
@@ -3522,6 +3527,270 @@ def existing_household_dialog():
                 )
 
             return
+
+        # -------------------------------------------------
+        # Determine whether this household is returning
+        # to an active registration or beginning renewal
+        # -------------------------------------------------
+
+        renewal_result = (
+            get_household_for_renewal(
+                household_reference
+            )
+        )
+
+        if (
+            renewal_result is not None
+            and renewal_result.get(
+                "active_year",
+                {},
+            ).get(
+                "renewal_open",
+                False,
+            )
+            and any(
+                child.get(
+                    "eligible_for_renewal",
+                    False,
+                )
+                for child
+                in renewal_result.get(
+                    "children",
+                    [],
+                )
+            )
+        ):
+
+            st.session_state.registration_mode = (
+                "renewal"
+            )
+
+            st.session_state.existing_household_reference = (
+                household_reference
+            )
+
+            st.session_state.renewal_data = (
+                renewal_result
+            )
+
+            renewal_household = (
+                renewal_result.get(
+                    "household",
+                    {}
+                )
+            )
+
+            st.session_state.household = {
+                "parent_a_first_name":
+                    renewal_household.get(
+                        "parent_a_first_name"
+                    )
+                    or "",
+
+                "parent_a_last_name":
+                    renewal_household.get(
+                        "parent_a_last_name"
+                    )
+                    or "",
+
+                "parent_a_email":
+                    renewal_household.get(
+                        "parent_a_email"
+                    )
+                    or "",
+
+                "parent_a_phone":
+                    renewal_household.get(
+                        "parent_a_phone"
+                    )
+                    or "",
+
+                "parent_b_first_name":
+                    renewal_household.get(
+                        "parent_b_first_name"
+                    )
+                    or "",
+
+                "parent_b_last_name":
+                    renewal_household.get(
+                        "parent_b_last_name"
+                    )
+                    or "",
+
+                "parent_b_email":
+                    renewal_household.get(
+                        "parent_b_email"
+                    )
+                    or "",
+
+                "parent_b_phone":
+                    renewal_household.get(
+                        "parent_b_phone"
+                    )
+                    or "",
+
+                "address_line_1":
+                    renewal_household.get(
+                        "address_line_1"
+                    )
+                    or "",
+
+                "address_line_2":
+                    renewal_household.get(
+                        "address_line_2"
+                    )
+                    or "",
+
+                "city":
+                    renewal_household.get(
+                        "city"
+                    )
+                    or "",
+
+                "state":
+                    renewal_household.get(
+                        "state"
+                    )
+                    or "",
+
+                "zip_code":
+                    renewal_household.get(
+                        "zip_code"
+                    )
+                    or "",
+
+                "emergency_contact_name":
+                    renewal_household.get(
+                        "emergency_contact_name"
+                    )
+                    or "",
+
+                "emergency_contact_relationship":
+                    renewal_household.get(
+                        "emergency_contact_relationship"
+                    )
+                    or "",
+
+                "emergency_contact_phone":
+                    renewal_household.get(
+                        "emergency_contact_phone"
+                    )
+                    or "",
+            }
+
+            st.session_state.children = []
+
+            for renewal_child in (
+                renewal_result.get(
+                    "children",
+                    []
+                )
+            ):
+
+                proposed_grade = (
+                    renewal_child.get(
+                        "proposed_grade"
+                    )
+                )
+
+                previous_school = (
+                    renewal_child.get(
+                        "previous_school"
+                    )
+                    or ""
+                )
+
+                st.session_state.children.append(
+                    {
+                        "child_id":
+                            renewal_child.get(
+                                "child_id"
+                            ),
+
+                        "first_name":
+                            renewal_child.get(
+                                "first_name"
+                            )
+                            or "",
+
+                        "middle_name":
+                            renewal_child.get(
+                                "middle_name"
+                            )
+                            or "",
+
+                        "last_name":
+                            renewal_child.get(
+                                "last_name"
+                            )
+                            or "",
+
+                        "date_of_birth":
+                            renewal_child.get(
+                                "date_of_birth"
+                            ),
+
+                        "previous_grade":
+                            renewal_child.get(
+                                "previous_grade"
+                            ),
+
+                        "grade":
+                            proposed_grade
+                            or "",
+
+                        "school":
+                            previous_school,
+
+                        "already_enrolled":
+                            renewal_child.get(
+                                "already_enrolled",
+                                False,
+                            ),
+
+                        "eligible_for_renewal":
+                            renewal_child.get(
+                                "eligible_for_renewal",
+                                False,
+                            ),
+
+                        "renew_for_active_year":
+                            renewal_child.get(
+                                "eligible_for_renewal",
+                                False,
+                            ),
+
+                        "renewal_reviewed":
+                            False,
+
+                        "sacraments":
+                            renewal_child.get(
+                                "sacraments",
+                                [],
+                            ),
+
+                        "sacrament_review":
+                            renewal_child.get(
+                                "sacrament_review",
+                                {},
+                            ),
+
+                        "receiving_first_communion_reconciliation":
+                            False,
+
+                        "receiving_confirmation":
+                            False,
+
+                        "sacraments_to_record":
+                            [],
+                    }
+                )
+
+            clear_verification_state()
+            clear_recovery_state()
+            clear_admin_login_state()
+
+            st.rerun()
 
         result = (
             get_registration_by_reference(
@@ -4737,6 +5006,1039 @@ def child_dialog(
             st.session_state.children.append(
                 child_data
             )
+
+        st.rerun()
+
+
+# ---------------------------------------------------------
+# Renewal child dialog
+# ---------------------------------------------------------
+
+@st.dialog("Review Child Information")
+def renewal_child_dialog(
+    child_index: int,
+):
+
+    child = (
+        st.session_state.children[
+            child_index
+        ]
+    )
+
+    grades = [
+        "Select grade",
+        "Pre-K",
+        "K",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11",
+        "12",
+    ]
+
+    existing_grade = (
+        child.get(
+            "grade",
+            "Select grade",
+        )
+        or "Select grade"
+    )
+
+    try:
+
+        grade_index = (
+            grades.index(
+                existing_grade
+            )
+        )
+
+    except ValueError:
+
+        grade_index = 0
+
+    # -----------------------------------------------------
+    # Basic information
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Basic Information"
+    )
+
+    st.caption(
+        "Please review this information and make any "
+        "needed corrections."
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        first_name = (
+            st.text_input(
+                "First name",
+                value=child.get(
+                    "first_name",
+                    "",
+                ),
+            )
+        )
+
+    with col2:
+
+        middle_name = (
+            st.text_input(
+                "Middle name",
+                value=child.get(
+                    "middle_name",
+                    "",
+                ),
+            )
+        )
+
+    last_name = (
+        st.text_input(
+            "Last name",
+            value=child.get(
+                "last_name",
+                "",
+            ),
+        )
+    )
+
+    today = date.today()
+
+    earliest_birth_date = date(
+        today.year - 20,
+        1,
+        1,
+    )
+
+    date_of_birth = (
+        st.date_input(
+            "Date of birth",
+            value=child.get(
+                "date_of_birth",
+                None,
+            ),
+            min_value=earliest_birth_date,
+            max_value=today,
+        )
+    )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # New-year enrollment
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Faith Formation Enrollment"
+    )
+
+    renew_for_active_year = (
+        st.toggle(
+            "Register this child for the new "
+            "Faith Formation year",
+            value=child.get(
+                "renew_for_active_year",
+                True,
+            ),
+        )
+    )
+
+    if renew_for_active_year:
+
+        grade = st.selectbox(
+            "Grade for the new school year",
+            grades,
+            index=grade_index,
+        )
+
+        school = st.text_input(
+            "School for the new school year",
+            value=child.get(
+                "school",
+                "",
+            ),
+        )
+
+    else:
+
+        grade = (
+            child.get(
+                "grade",
+                "",
+            )
+        )
+
+        school = (
+            child.get(
+                "school",
+                "",
+            )
+        )
+
+        st.info(
+            "This child's information will remain with "
+            "the household, but they will not be registered "
+            "for the new Faith Formation year."
+        )
+
+    # -----------------------------------------------------
+    # Sacramental history
+    # -----------------------------------------------------
+
+    if renew_for_active_year:
+
+        st.divider()
+
+        st.subheader(
+            "Sacramental History"
+        )
+
+        sacraments = (
+            child.get(
+                "sacraments",
+                []
+            )
+            or []
+        )
+
+        recorded_sacraments = {
+            sacrament.get(
+                "sacrament"
+            )
+            for sacrament in sacraments
+            if sacrament.get(
+                "received",
+                False,
+            )
+        }
+
+        sacrament_display_order = [
+            "Baptism",
+            "First Reconciliation",
+            "First Communion",
+            "Confirmation",
+        ]
+
+        # -------------------------------------------------
+        # Determine prior-year completion questions
+        # -------------------------------------------------
+
+        sacrament_review = (
+            child.get(
+                "sacrament_review",
+                {}
+            )
+            or {}
+        )
+
+        completion_questions = []
+
+        completion_question_map = [
+            (
+                "first_reconciliation",
+                "First Reconciliation",
+            ),
+            (
+                "first_communion",
+                "First Communion",
+            ),
+            (
+                "confirmation",
+                "Confirmation",
+            ),
+        ]
+
+        for (
+            review_key,
+            sacrament_name,
+        ) in completion_question_map:
+
+            review_item = (
+                sacrament_review.get(
+                    review_key,
+                    {}
+                )
+                or {}
+            )
+
+            if review_item.get(
+                "needs_completion_confirmation",
+                False,
+            ):
+
+                completion_questions.append(
+                    sacrament_name
+                )
+
+        completion_answers = {}
+
+        # -------------------------------------------------
+        # Show what is already known
+        # -------------------------------------------------
+
+        if recorded_sacraments:
+
+            st.caption(
+                "Our records show that this child has "
+                "received:"
+            )
+
+            for sacrament_name in (
+                sacrament_display_order
+            ):
+
+                if (
+                    sacrament_name
+                    in recorded_sacraments
+                ):
+
+                    st.write(
+                        f"✓ {sacrament_name}"
+                    )
+
+            missing_history_exists = (
+                len(recorded_sacraments) < 4
+            )
+
+            if missing_history_exists:
+
+                st.caption(
+                    "Please review the remaining questions "
+                    "below to help us keep this child's "
+                    "sacramental history up to date."
+                )
+
+        else:
+
+            st.info(
+                "We do not currently have any received "
+                "sacraments recorded for this child."
+            )
+
+            st.caption(
+                "This does not mean the child has not "
+                "received any sacraments. Please review "
+                "the questions below to help us bring "
+                "our records up to date."
+            )
+
+        # -------------------------------------------------
+        # Missing sacramental history
+        # -------------------------------------------------
+
+        history_options = [
+            "Select one",
+            "Yes",
+            "No",
+            "I'm not sure",
+        ]
+
+        baptism_recorded = (
+            "Baptism"
+            in recorded_sacraments
+        )
+
+        reconciliation_recorded = (
+            "First Reconciliation"
+            in recorded_sacraments
+        )
+
+        communion_recorded = (
+            "First Communion"
+            in recorded_sacraments
+        )
+
+        confirmation_recorded = (
+            "Confirmation"
+            in recorded_sacraments
+        )
+
+        baptism_history_answer = None
+        reconciliation_history_answer = None
+        communion_history_answer = None
+        confirmation_history_answer = None
+
+        # -------------------------------------------------
+        # Baptism
+        # -------------------------------------------------
+
+        if baptism_recorded:
+
+            baptism_received_for_history = True
+
+        else:
+
+            existing_baptism_answer = (
+                child.get(
+                    "baptism_history_answer"
+                )
+            )
+
+            baptism_index = (
+                history_options.index(
+                    existing_baptism_answer
+                )
+                if existing_baptism_answer
+                in history_options
+                else 0
+            )
+
+            baptism_history_answer = (
+                st.selectbox(
+                    f"Has {first_name} been baptized?",
+                    history_options,
+                    index=baptism_index,
+                    key=(
+                        f"renewal_baptism_"
+                        f"{child.get('child_id')}"
+                    ),
+                )
+            )
+
+            baptism_received_for_history = (
+                baptism_history_answer
+                == "Yes"
+            )
+
+        # -------------------------------------------------
+        # First Reconciliation
+        # -------------------------------------------------
+
+        if baptism_received_for_history:
+
+            if reconciliation_recorded:
+
+                reconciliation_received_for_history = True
+
+            elif (
+                "First Reconciliation"
+                in completion_questions
+            ):
+
+                reconciliation_received_for_history = False
+
+            else:
+
+                existing_reconciliation_answer = (
+                    child.get(
+                        "reconciliation_history_answer"
+                    )
+                )
+
+                reconciliation_index = (
+                    history_options.index(
+                        existing_reconciliation_answer
+                    )
+                    if existing_reconciliation_answer
+                    in history_options
+                    else 0
+                )
+
+                reconciliation_history_answer = (
+                    st.selectbox(
+                        (
+                            f"Has {first_name} received "
+                            "First Reconciliation?"
+                        ),
+                        history_options,
+                        index=reconciliation_index,
+                        key=(
+                            f"renewal_reconciliation_"
+                            f"{child.get('child_id')}"
+                        ),
+                    )
+                )
+
+                reconciliation_received_for_history = (
+                    reconciliation_history_answer
+                    == "Yes"
+                )
+
+        else:
+
+            reconciliation_received_for_history = (
+                reconciliation_recorded
+            )
+
+        # -------------------------------------------------
+        # First Communion
+        # -------------------------------------------------
+
+        if baptism_received_for_history:
+
+            if communion_recorded:
+
+                communion_received_for_history = True
+
+            elif (
+                "First Communion"
+                in completion_questions
+            ):
+
+                communion_received_for_history = False
+
+            else:
+
+                existing_communion_answer = (
+                    child.get(
+                        "communion_history_answer"
+                    )
+                )
+
+                communion_index = (
+                    history_options.index(
+                        existing_communion_answer
+                    )
+                    if existing_communion_answer
+                    in history_options
+                    else 0
+                )
+
+                communion_history_answer = (
+                    st.selectbox(
+                        (
+                            f"Has {first_name} received "
+                            "First Communion?"
+                        ),
+                        history_options,
+                        index=communion_index,
+                        key=(
+                            f"renewal_communion_"
+                            f"{child.get('child_id')}"
+                        ),
+                    )
+                )
+
+                communion_received_for_history = (
+                    communion_history_answer
+                    == "Yes"
+                )
+
+        else:
+
+            communion_received_for_history = (
+                communion_recorded
+            )
+
+        # -------------------------------------------------
+        # Prior-year completion questions
+        # -------------------------------------------------
+
+        if completion_questions:
+
+            st.markdown(
+                "**Last year's sacrament preparation**"
+            )
+
+            st.caption(
+                "Our records show that this child was "
+                "preparing for the following sacrament or "
+                "sacraments last year. Please let us know "
+                "whether they were received."
+            )
+
+            for sacrament_name in (
+                completion_questions
+            ):
+
+                existing_answer = (
+                    child.get(
+                        "sacrament_completion_answers",
+                        {},
+                    ).get(
+                        sacrament_name
+                    )
+                )
+
+                answer_options = [
+                    "Select one",
+                    "Yes",
+                    "No",
+                ]
+
+                if existing_answer in (
+                    "Yes",
+                    "No",
+                ):
+
+                    answer_index = (
+                        answer_options.index(
+                            existing_answer
+                        )
+                    )
+
+                else:
+
+                    answer_index = 0
+
+                completion_answers[
+                    sacrament_name
+                ] = st.selectbox(
+                    (
+                        f"Did {first_name} receive "
+                        f"{sacrament_name} last year?"
+                    ),
+                    answer_options,
+                    index=answer_index,
+                    key=(
+                        f"renewal_completion_"
+                        f"{child.get('child_id')}_"
+                        f"{sacrament_name}"
+                    ),
+                )
+
+        # -------------------------------------------------
+        # Determine history after prior-year answers
+        # -------------------------------------------------
+
+        reconciliation_received_for_history = (
+            reconciliation_received_for_history
+            or completion_answers.get(
+                "First Reconciliation"
+            )
+            == "Yes"
+        )
+
+        communion_received_for_history = (
+            communion_received_for_history
+            or completion_answers.get(
+                "First Communion"
+            )
+            == "Yes"
+        )
+
+        prerequisites_for_confirmation = (
+            baptism_received_for_history
+            and reconciliation_received_for_history
+            and communion_received_for_history
+        )
+
+        # -------------------------------------------------
+        # Confirmation
+        # -------------------------------------------------
+
+        if prerequisites_for_confirmation:
+
+            if confirmation_recorded:
+
+                confirmation_received_for_history = True
+
+            elif (
+                "Confirmation"
+                in completion_questions
+            ):
+
+                confirmation_received_for_history = (
+                    completion_answers.get(
+                        "Confirmation"
+                    )
+                    == "Yes"
+                )
+
+            else:
+
+                existing_confirmation_answer = (
+                    child.get(
+                        "confirmation_history_answer"
+                    )
+                )
+
+                confirmation_index = (
+                    history_options.index(
+                        existing_confirmation_answer
+                    )
+                    if existing_confirmation_answer
+                    in history_options
+                    else 0
+                )
+
+                confirmation_history_answer = (
+                    st.selectbox(
+                        (
+                            f"Has {first_name} received "
+                            "Confirmation?"
+                        ),
+                        history_options,
+                        index=confirmation_index,
+                        key=(
+                            f"renewal_confirmation_history_"
+                            f"{child.get('child_id')}"
+                        ),
+                    )
+                )
+
+                confirmation_received_for_history = (
+                    confirmation_history_answer
+                    == "Yes"
+                )
+
+        else:
+
+            confirmation_received_for_history = (
+                confirmation_recorded
+            )
+
+        # -------------------------------------------------
+        # New-year sacrament preparation
+        # -------------------------------------------------
+
+        baptism_received = (
+            baptism_received_for_history
+        )
+
+        first_reconciliation_received = (
+            reconciliation_received_for_history
+        )
+
+        first_communion_received = (
+            communion_received_for_history
+        )
+
+        confirmation_received = (
+            confirmation_received_for_history
+        )
+
+        show_fcr_prep = (
+            baptism_received
+            and not (
+                first_reconciliation_received
+                and first_communion_received
+            )
+        )
+
+        show_confirmation_prep = (
+            baptism_received
+            and first_reconciliation_received
+            and first_communion_received
+            and not confirmation_received
+        )
+
+        if (
+            show_fcr_prep
+            or show_confirmation_prep
+        ):
+
+            st.divider()
+
+            st.subheader(
+                "Sacrament Preparation for "
+                f"{st.session_state.renewal_data.get('active_year', {}).get('name', 'the new year')}"
+            )
+
+            st.caption(
+                "Select any sacraments this child will be "
+                "preparing to receive during the new Faith "
+                "Formation year."
+            )
+
+        if show_fcr_prep:
+
+            receiving_first_communion_reconciliation = (
+                st.toggle(
+                    "Preparing for First Reconciliation / "
+                    "First Communion",
+                    value=child.get(
+                        "receiving_first_communion_reconciliation",
+                        False,
+                    ),
+                    key=(
+                        f"renewal_fcr_prep_"
+                        f"{child.get('child_id')}"
+                    ),
+                )
+            )
+
+        else:
+
+            receiving_first_communion_reconciliation = (
+                False
+            )
+
+        if show_confirmation_prep:
+
+            receiving_confirmation = (
+                st.toggle(
+                    "Preparing for Confirmation",
+                    value=child.get(
+                        "receiving_confirmation",
+                        False,
+                    ),
+                    key=(
+                        f"renewal_confirmation_prep_"
+                        f"{child.get('child_id')}"
+                    ),
+                )
+            )
+
+        else:
+
+            receiving_confirmation = (
+                False
+            )
+
+    else:
+
+        receiving_first_communion_reconciliation = (
+            child.get(
+                "receiving_first_communion_reconciliation",
+                False,
+            )
+        )
+
+        receiving_confirmation = (
+            child.get(
+                "receiving_confirmation",
+                False,
+            )
+        )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Save draft
+    # -----------------------------------------------------
+
+    if st.button(
+        "Save Child",
+        type="primary",
+        use_container_width=True,
+    ):
+
+        if not first_name.strip():
+
+            st.error(
+                "Please enter the child's first name."
+            )
+            return
+
+        if not last_name.strip():
+
+            st.error(
+                "Please enter the child's last name."
+            )
+            return
+
+        if date_of_birth is None:
+
+            st.error(
+                "Please enter the child's date of birth."
+            )
+            return
+
+        if renew_for_active_year:
+
+            if grade == "Select grade":
+
+                st.error(
+                    "Please select the child's grade "
+                    "for the new school year."
+                )
+                return
+
+            if not school.strip():
+
+                st.error(
+                    "Please enter the child's school "
+                    "for the new school year."
+                )
+                return
+
+            history_answers_to_validate = [
+                (
+                    "Baptism",
+                    baptism_history_answer,
+                ),
+                (
+                    "First Reconciliation",
+                    reconciliation_history_answer,
+                ),
+                (
+                    "First Communion",
+                    communion_history_answer,
+                ),
+                (
+                    "Confirmation",
+                    confirmation_history_answer,
+                ),
+            ]
+
+            for (
+                sacrament_name,
+                answer,
+            ) in history_answers_to_validate:
+
+                if answer == "Select one":
+
+                    st.error(
+                        "Please tell us whether "
+                        f"{first_name.strip()} has received "
+                        f"{sacrament_name}."
+                    )
+                    return
+
+            for (
+                sacrament_name,
+                answer,
+            ) in completion_answers.items():
+
+                if answer == "Select one":
+
+                    st.error(
+                        "Please tell us whether "
+                        f"{first_name.strip()} received "
+                        f"{sacrament_name} last year."
+                    )
+                    return
+
+        child["first_name"] = (
+            first_name.strip()
+        )
+
+        child["middle_name"] = (
+            middle_name.strip()
+        )
+
+        child["last_name"] = (
+            last_name.strip()
+        )
+
+        child["date_of_birth"] = (
+            date_of_birth
+        )
+
+        child["grade"] = (
+            grade
+        )
+
+        child["school"] = (
+            school.strip()
+            if isinstance(
+                school,
+                str,
+            )
+            else school
+        )
+
+        child[
+            "renew_for_active_year"
+        ] = renew_for_active_year
+
+        child[
+            "receiving_first_communion_reconciliation"
+        ] = (
+            receiving_first_communion_reconciliation
+        )
+
+        child[
+            "receiving_confirmation"
+        ] = (
+            receiving_confirmation
+        )
+
+        child[
+            "baptism_history_answer"
+        ] = baptism_history_answer
+
+        child[
+            "reconciliation_history_answer"
+        ] = reconciliation_history_answer
+
+        child[
+            "communion_history_answer"
+        ] = communion_history_answer
+
+        child[
+            "confirmation_history_answer"
+        ] = confirmation_history_answer
+
+        child[
+            "sacrament_completion_answers"
+        ] = completion_answers
+
+        # ---------------------------------------------
+        # Build additive sacramental-history updates
+        # ---------------------------------------------
+
+        sacraments_to_record = []
+
+        history_answer_map = [
+            (
+                "Baptism",
+                baptism_history_answer,
+            ),
+            (
+                "First Reconciliation",
+                reconciliation_history_answer,
+            ),
+            (
+                "First Communion",
+                communion_history_answer,
+            ),
+            (
+                "Confirmation",
+                confirmation_history_answer,
+            ),
+        ]
+
+        for (
+            sacrament_name,
+            answer,
+        ) in history_answer_map:
+
+            if answer == "Yes":
+
+                sacraments_to_record.append(
+                    {
+                        "sacrament":
+                            sacrament_name,
+                    }
+                )
+
+        for (
+            sacrament_name,
+            answer,
+        ) in completion_answers.items():
+
+            if (
+                answer == "Yes"
+                and not any(
+                    item.get(
+                        "sacrament"
+                    )
+                    == sacrament_name
+                    for item
+                    in sacraments_to_record
+                )
+            ):
+
+                sacraments_to_record.append(
+                    {
+                        "sacrament":
+                            sacrament_name,
+                    }
+                )
+
+        child[
+            "sacraments_to_record"
+        ] = sacraments_to_record
+
+        child[
+            "renewal_reviewed"
+        ] = True
+
+        st.session_state.children[
+            child_index
+        ] = child
 
         st.rerun()
 
@@ -6795,6 +8097,761 @@ if (
         ),
         unsafe_allow_html=True,
     )
+
+    st.stop()
+
+# ---------------------------------------------------------
+# Renewal landing screen
+# ---------------------------------------------------------
+
+if (
+    st.session_state.registration_mode
+    == "renewal"
+):
+
+    renewal_data = (
+        st.session_state.renewal_data
+    )
+
+    if not renewal_data:
+
+        st.error(
+            "We couldn't load your renewal information. "
+            "Please return to the beginning and try again."
+        )
+
+        if st.button(
+            "Return to Registration",
+            use_container_width=True,
+        ):
+
+            reset_public_registration_state()
+            st.session_state.renewal_data = None
+            st.rerun()
+
+        st.stop()
+
+    # -----------------------------------------------------
+    # Successful renewal submission
+    # -----------------------------------------------------
+
+    renewal_submission_result = (
+        st.session_state.get(
+            "renewal_submission_result"
+        )
+    )
+
+    if renewal_submission_result:
+
+        submitted_year_name = (
+            renewal_submission_result.get(
+                "year"
+            )
+            or renewal_data.get(
+                "active_year",
+                {}
+            ).get(
+                "name",
+                "the new Faith Formation year",
+            )
+        )
+
+        if LOGO_PATH.exists():
+
+            logo_url = (
+                image_to_data_url(
+                    LOGO_PATH
+                )
+            )
+
+            st.markdown(
+                f"""
+                <div class="landing-logo">
+                    <img
+                        src="{logo_url}"
+                        alt="Ascension Catholic Church"
+                    >
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown(
+            """
+            <div class="landing-parish">
+                Ascension Catholic Church
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.title(
+            "Renewal Complete"
+        )
+
+        st.success(
+            f"Your family's Faith Formation registration "
+            f"for {submitted_year_name} has been submitted."
+        )
+
+        st.write(
+            "Thank you for taking a few moments to review "
+            "and update your family's information."
+        )
+
+        st.caption(
+            "Your registration has been received by "
+            "Ascension Catholic Church."
+        )
+
+        if st.button(
+            "Return to Registration",
+            use_container_width=True,
+        ):
+
+            reset_public_registration_state()
+
+            st.session_state.renewal_data = None
+
+            st.session_state.pop(
+                "renewal_submission_result",
+                None,
+            )
+
+            st.rerun()
+
+        st.stop()
+
+    active_year = (
+        renewal_data.get(
+            "active_year",
+            {}
+        )
+    )
+
+    household = (
+        renewal_data.get(
+            "household",
+            {}
+        )
+    )
+
+    children = (
+        st.session_state.children
+        or []
+    )
+
+    year_name = (
+        active_year.get(
+            "name",
+            "the upcoming catechetical year",
+        )
+    )
+
+    parent_name = (
+        household.get(
+            "parent_a_first_name",
+            ""
+        )
+        or ""
+    ).strip()
+
+    # -----------------------------------------------------
+    # Header
+    # -----------------------------------------------------
+
+    if LOGO_PATH.exists():
+
+        logo_url = (
+            image_to_data_url(
+                LOGO_PATH
+            )
+        )
+
+        st.markdown(
+            f"""
+            <div class="landing-logo">
+                <img
+                    src="{logo_url}"
+                    alt="Ascension Catholic Church"
+                >
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        """
+        <div class="landing-parish">
+            Ascension Catholic Church
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.title(
+        f"Renew for {year_name}"
+    )
+
+    if parent_name:
+
+        st.write(
+            f"Welcome back, **{parent_name}**! "
+            "Let's review your family's information "
+            "for the new Faith Formation year."
+        )
+
+    else:
+
+        st.write(
+            "Welcome back! Let's review your family's "
+            "information for the new Faith Formation year."
+        )
+
+    st.caption(
+        "Nothing will be submitted until you review "
+        "and confirm your family's information."
+    )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Household review
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Household Information"
+    )
+
+    current_household = (
+        st.session_state.household
+        or {}
+    )
+
+    parent_a_name = " ".join(
+        part
+        for part in [
+            current_household.get(
+                "parent_a_first_name",
+                "",
+            ),
+            current_household.get(
+                "parent_a_last_name",
+                "",
+            ),
+        ]
+        if part
+    )
+
+    address_line_1 = (
+        current_household.get(
+            "address_line_1",
+            "",
+        )
+        or ""
+    )
+
+    city = (
+        current_household.get(
+            "city",
+            "",
+        )
+        or ""
+    )
+
+    state = (
+        current_household.get(
+            "state",
+            "",
+        )
+        or ""
+    )
+
+    zip_code = (
+        current_household.get(
+            "zip_code",
+            "",
+        )
+        or ""
+    )
+
+    with st.container(
+        border=True,
+    ):
+
+        if parent_a_name:
+
+            st.write(
+                f"**{parent_a_name}**"
+            )
+
+        st.write(
+            current_household.get(
+                "parent_a_email",
+                "",
+            )
+        )
+
+        st.write(
+            current_household.get(
+                "parent_a_phone",
+                "",
+            )
+        )
+
+        if address_line_1:
+
+            st.write(
+                address_line_1
+            )
+
+        st.write(
+            f"{city}, {state} {zip_code}".strip()
+        )
+
+        if st.button(
+            "Review / Edit Household Information",
+            use_container_width=True,
+        ):
+
+            household_dialog()
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Children available for renewal
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Your Children"
+    )
+
+    if not children:
+
+        st.info(
+            "We couldn't find any children from a prior "
+            "Faith Formation registration."
+        )
+
+    for child_index, child in enumerate(
+        children
+    ):
+
+        first_name = (
+            child.get(
+                "first_name",
+                ""
+            )
+            or ""
+        )
+
+        last_name = (
+            child.get(
+                "last_name",
+                ""
+            )
+            or ""
+        )
+
+        previous_grade = (
+            child.get(
+                "previous_grade"
+            )
+            or "—"
+        )
+
+        proposed_grade = (
+            child.get(
+                "grade"
+            )
+            or None
+        )
+
+        already_enrolled = bool(
+            child.get(
+                "already_enrolled",
+                False,
+            )
+        )
+
+        eligible = bool(
+            child.get(
+                "eligible_for_renewal",
+                False,
+            )
+        )
+
+        renew_for_active_year = bool(
+            child.get(
+                "renew_for_active_year",
+                False,
+            )
+        )
+
+        renewal_reviewed = bool(
+            child.get(
+                "renewal_reviewed",
+                False,
+            )
+        )
+
+        with st.container(
+            border=True,
+        ):
+
+            st.markdown(
+                f"### {first_name} {last_name}"
+            )
+
+            if proposed_grade:
+
+                st.write(
+                    f"**Grade:** "
+                    f"{previous_grade} → {proposed_grade}"
+                )
+
+            else:
+
+                st.write(
+                    f"**Previous Grade:** "
+                    f"{previous_grade}"
+                )
+
+            if already_enrolled:
+
+                st.success(
+                    f"Already registered for {year_name}"
+                )
+
+            elif (
+                eligible
+                and not renewal_reviewed
+            ):
+
+                st.info(
+                    f"Eligible for renewal for {year_name}"
+                )
+
+            elif (
+                eligible
+                and renewal_reviewed
+                and renew_for_active_year
+            ):
+
+                st.success(
+                    f"Ready for renewal for {year_name}"
+                )
+
+            elif (
+                eligible
+                and renewal_reviewed
+                and not renew_for_active_year
+            ):
+
+                st.warning(
+                    f"Not being registered for {year_name}"
+                )
+
+            else:
+
+                st.warning(
+                    "This student is not currently eligible "
+                    "for automatic renewal."
+                )
+
+            if st.button(
+                "Review / Edit Child",
+                key=(
+                    f"renewal_edit_child_"
+                    f"{child.get('child_id', child_index)}"
+                ),
+                use_container_width=True,
+            ):
+
+                renewal_child_dialog(
+                    child_index
+                )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Review renewal
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Review Renewal"
+    )
+
+    renewal_children = (
+        st.session_state.children
+        or []
+    )
+
+    children_needing_review = [
+        child
+        for child in renewal_children
+        if (
+            child.get(
+                "eligible_for_renewal",
+                False,
+            )
+            and not child.get(
+                "already_enrolled",
+                False,
+            )
+            and not child.get(
+                "renewal_reviewed",
+                False,
+            )
+        )
+    ]
+
+    children_to_renew = [
+        child
+        for child in renewal_children
+        if (
+            child.get(
+                "renew_for_active_year",
+                False,
+            )
+            and child.get(
+                "renewal_reviewed",
+                False,
+            )
+            and not child.get(
+                "already_enrolled",
+                False,
+            )
+        )
+    ]
+
+    if children_needing_review:
+
+        st.info(
+            "Please review each eligible child before "
+            "continuing with your renewal."
+        )
+
+        st.caption(
+            f"{len(children_needing_review)} "
+            f"{'child still needs' if len(children_needing_review) == 1 else 'children still need'} "
+            "to be reviewed."
+        )
+
+    elif not children_to_renew:
+
+        st.warning(
+            f"No children are currently selected for "
+            f"registration for {year_name}."
+        )
+
+        st.caption(
+            "Review a child above and choose to register "
+            "them for the new Faith Formation year before "
+            "continuing."
+        )
+
+    else:
+
+        st.success(
+            "Your renewal is ready to review."
+        )
+
+        st.caption(
+            "Please check the information below before "
+            "submitting your registration."
+        )
+
+        for child in children_to_renew:
+
+            child_name = " ".join(
+                part
+                for part in [
+                    child.get(
+                        "first_name",
+                        "",
+                    ),
+                    child.get(
+                        "middle_name",
+                        "",
+                    ),
+                    child.get(
+                        "last_name",
+                        "",
+                    ),
+                ]
+                if part
+            )
+
+            child_grade = (
+                child.get(
+                    "grade",
+                    "",
+                )
+                or ""
+            )
+
+            child_school = (
+                child.get(
+                    "school",
+                    "",
+                )
+                or ""
+            )
+
+            sacraments_to_record = (
+                child.get(
+                    "sacraments_to_record",
+                    []
+                )
+                or []
+            )
+
+            with st.container(
+                border=True,
+            ):
+
+                st.markdown(
+                    f"### {child_name}"
+                )
+
+                st.write(
+                    f"**Grade:** {child_grade}"
+                )
+
+                st.write(
+                    f"**School:** {child_school}"
+                )
+
+                if sacraments_to_record:
+
+                    sacrament_names = [
+                        item.get(
+                            "sacrament",
+                            "",
+                        )
+                        for item
+                        in sacraments_to_record
+                        if item.get(
+                            "sacrament"
+                        )
+                    ]
+
+                    if sacrament_names:
+
+                        st.write(
+                            "**Sacramental history updates:** "
+                            + ", ".join(
+                                sacrament_names
+                            )
+                        )
+
+                if child.get(
+                    "receiving_first_communion_reconciliation",
+                    False,
+                ):
+
+                    st.write(
+                        "**Sacrament preparation:** "
+                        "First Reconciliation / "
+                        "First Communion"
+                    )
+
+                if child.get(
+                    "receiving_confirmation",
+                    False,
+                ):
+
+                    st.write(
+                        "**Sacrament preparation:** "
+                        "Confirmation"
+                    )
+
+                if not (
+                    child.get(
+                        "receiving_first_communion_reconciliation",
+                        False,
+                    )
+                    or child.get(
+                        "receiving_confirmation",
+                        False,
+                    )
+                ):
+
+                    st.caption(
+                        "No sacrament preparation selected "
+                        "for the new year."
+                    )
+
+        if st.button(
+            "Submit Renewal",
+            type="primary",
+            use_container_width=True,
+        ):
+
+            household_reference = (
+                st.session_state.existing_household_reference
+                or ""
+            )
+
+            submission_household = dict(
+                current_household
+            )
+
+            submission_children = [
+                dict(child)
+                for child in children_to_renew
+            ]
+
+            try:
+
+                result = (
+                    submit_household_renewal(
+                        household_reference=(
+                            household_reference
+                        ),
+                        household=(
+                            submission_household
+                        ),
+                        children=(
+                            submission_children
+                        ),
+                    )
+                )
+
+            except Exception as exc:
+
+                st.error(
+                    "We couldn't complete your renewal. "
+                    "No changes were submitted."
+                )
+
+                st.caption(
+                    str(exc)
+                )
+
+            else:
+
+                st.session_state[
+                    "renewal_submission_result"
+                ] = result
+
+                st.rerun()
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Temporary navigation
+    # -----------------------------------------------------
+
+    if st.button(
+        "Return to Registration",
+        use_container_width=True,
+    ):
+
+        reset_public_registration_state()
+        st.session_state.renewal_data = None
+        st.rerun()
 
     st.stop()
 

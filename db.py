@@ -218,6 +218,177 @@ def init_db() -> None:
         )
 
         # -------------------------------------------------
+        # Renewal invitation batches
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS renewal_invitation_batches (
+                batch_id BIGSERIAL PRIMARY KEY,
+
+                year_id BIGINT NOT NULL UNIQUE,
+
+                created_at TIMESTAMPTZ NOT NULL
+                    DEFAULT CURRENT_TIMESTAMP,
+
+                created_by TEXT NOT NULL,
+
+                household_count INTEGER NOT NULL,
+
+                CONSTRAINT fk_renewal_invitation_year
+                    FOREIGN KEY (year_id)
+                    REFERENCES catechetical_years (year_id)
+                    ON DELETE RESTRICT,
+
+                CONSTRAINT chk_renewal_invitation_household_count
+                    CHECK (
+                        household_count >= 0
+                    )
+            );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_renewal_invitation_year_id
+            ON renewal_invitation_batches (
+                year_id
+            );
+            """
+        )
+
+        # -------------------------------------------------
+        # Renewal invitation recipients
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS
+                renewal_invitation_recipients (
+                    recipient_id BIGSERIAL PRIMARY KEY,
+
+                    batch_id BIGINT NOT NULL,
+                    household_id BIGINT NOT NULL,
+
+                    email_address TEXT NOT NULL,
+
+                    status TEXT NOT NULL
+                        DEFAULT 'pending',
+
+                    attempt_count INTEGER NOT NULL
+                        DEFAULT 0,
+
+                    sent_at TIMESTAMPTZ,
+                    last_attempt_at TIMESTAMPTZ,
+                    error_message TEXT,
+
+                    created_at TIMESTAMPTZ NOT NULL
+                        DEFAULT CURRENT_TIMESTAMP,
+
+                    CONSTRAINT fk_renewal_recipient_batch
+                        FOREIGN KEY (batch_id)
+                        REFERENCES renewal_invitation_batches (
+                            batch_id
+                        )
+                        ON DELETE CASCADE,
+
+                    CONSTRAINT fk_renewal_recipient_household
+                        FOREIGN KEY (household_id)
+                        REFERENCES households (
+                            household_id
+                        )
+                        ON DELETE RESTRICT,
+
+                    CONSTRAINT uq_renewal_recipient_household
+                        UNIQUE (
+                            batch_id,
+                            household_id
+                        ),
+
+                    CONSTRAINT chk_renewal_recipient_status
+                        CHECK (
+                            status IN (
+                                'pending',
+                                'sending',
+                                'sent',
+                                'failed'
+                            )
+                        ),
+
+                    CONSTRAINT chk_renewal_recipient_attempt_count
+                        CHECK (
+                            attempt_count >= 0
+                        )
+                );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_renewal_recipient_batch_id
+            ON renewal_invitation_recipients (
+                batch_id
+            );
+            """
+        )
+
+        # -------------------------------------------------
+        # Renewal invitation recovery events
+        # -------------------------------------------------
+
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS
+                renewal_invitation_recovery_events (
+                    recovery_event_id BIGSERIAL PRIMARY KEY,
+
+                    recipient_id BIGINT NOT NULL,
+
+                    action TEXT NOT NULL,
+
+                    attempt_count INTEGER NOT NULL,
+
+                    resolved_at TIMESTAMPTZ NOT NULL
+                        DEFAULT CURRENT_TIMESTAMP,
+
+                    resolved_by TEXT NOT NULL,
+
+                    CONSTRAINT fk_renewal_recovery_recipient
+                        FOREIGN KEY (recipient_id)
+                        REFERENCES renewal_invitation_recipients (
+                            recipient_id
+                        )
+                        ON DELETE CASCADE,
+
+                    CONSTRAINT chk_renewal_recovery_action
+                        CHECK (
+                            action IN (
+                                'mark_sent',
+                                'return_pending'
+                            )
+                        ),
+
+                    CONSTRAINT chk_renewal_recovery_attempt
+                        CHECK (
+                            attempt_count >= 1
+                        )
+                );
+            """
+        )
+
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS
+                idx_renewal_recovery_recipient_id
+            ON renewal_invitation_recovery_events (
+                recipient_id
+            );
+            """
+        )
+
+        # -------------------------------------------------
         # Classes
         # -------------------------------------------------
 
@@ -1553,6 +1724,11 @@ def save_registration(
                     child.get(
                         "first_communion_status"
                     ),
+
+                "Confirmation":
+                    child.get(
+                        "confirmation_status"
+                    ),
             }
 
             for (
@@ -1815,7 +1991,19 @@ def get_registration_by_reference(
                     )
                     THEN 'Yes'
                     ELSE NULL
-                END AS first_communion_status
+                END AS first_communion_status,
+
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM child_sacraments AS cs
+                        WHERE cs.child_id = c.child_id
+                          AND cs.sacrament = 'Confirmation'
+                          AND cs.received = TRUE
+                    )
+                    THEN 'Yes'
+                    ELSE NULL
+                END AS confirmation_status
 
             FROM children AS c
 
@@ -2148,6 +2336,11 @@ def update_registration(
                         child.get(
                             "first_communion_status"
                         ),
+
+                    "Confirmation":
+                        child.get(
+                            "confirmation_status"
+                        ),
                 }
 
                 for (
@@ -2155,11 +2348,7 @@ def update_registration(
                     status,
                 ) in sacrament_statuses.items():
 
-                    received = (
-                        status == "Yes"
-                    )
-
-                    if received:
+                    if status == "Yes":
 
                         conn.execute(
                             """
@@ -2179,20 +2368,6 @@ def update_registration(
                             )
                             DO UPDATE
                             SET received = TRUE;
-                            """,
-                            (
-                                child_id,
-                                sacrament,
-                            ),
-                        )
-
-                    else:
-
-                        conn.execute(
-                            """
-                            DELETE FROM child_sacraments
-                            WHERE child_id = %s
-                              AND sacrament = %s;
                             """,
                             (
                                 child_id,
@@ -2397,6 +2572,11 @@ def update_registration(
                     "First Communion":
                         child.get(
                             "first_communion_status"
+                        ),
+
+                    "Confirmation":
+                        child.get(
+                            "confirmation_status"
                         ),
                 }
 
@@ -2645,6 +2825,18 @@ def get_admin_roster() -> list[dict]:
                     ELSE NULL
                 END AS first_communion_status,
 
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM child_sacraments AS cs
+                        WHERE cs.child_id = c.child_id
+                          AND cs.sacrament = 'Confirmation'
+                          AND cs.received = TRUE
+                    )
+                    THEN 'Yes'
+                    ELSE NULL
+                END AS confirmation_status,
+
                 h.household_reference,
 
                 h.parent_a_first_name,
@@ -2780,6 +2972,236 @@ def get_roster_groups() -> list[dict]:
     )
 
     return groups
+
+
+
+# ---------------------------------------------------------
+# Renewal invitation state
+# ---------------------------------------------------------
+
+def get_renewal_invitation_state() -> dict:
+    """
+    Return the current renewal-invitation state.
+
+    Eligible households are households with at least one
+    enrolled child in the catechetical year immediately
+    preceding the active year who can progress to another
+    grade.
+
+    This function is read-only.
+    """
+
+    with _connect() as conn:
+
+        # -------------------------------------------------
+        # Active catechetical year
+        # -------------------------------------------------
+
+        active_year = conn.execute(
+            """
+            SELECT
+                year_id,
+                name,
+                start_year,
+                end_year,
+                renewal_open
+            FROM catechetical_years
+            WHERE status = 'active';
+            """
+        ).fetchone()
+
+        if active_year is None:
+            raise ValueError(
+                "No active catechetical year was found."
+            )
+
+        # -------------------------------------------------
+        # Immediately preceding catechetical year
+        # -------------------------------------------------
+
+        previous_year = conn.execute(
+            """
+            SELECT
+                year_id,
+                name,
+                start_year,
+                end_year
+            FROM catechetical_years
+            WHERE end_year = %s;
+            """,
+            (
+                active_year["start_year"],
+            ),
+        ).fetchone()
+
+        # -------------------------------------------------
+        # Existing invitation batch, if any
+        # -------------------------------------------------
+
+        batch = conn.execute(
+            """
+            SELECT
+                batch_id,
+                year_id,
+                created_at,
+                created_by,
+                household_count
+            FROM renewal_invitation_batches
+            WHERE year_id = %s;
+            """,
+            (
+                active_year["year_id"],
+            ),
+        ).fetchone()
+
+        # A brand-new installation or first catechetical
+        # year may legitimately have no preceding year.
+        if previous_year is None:
+            return {
+                "active_year":
+                    dict(active_year),
+
+                "previous_year":
+                    None,
+
+                "eligible_households":
+                    [],
+
+                "eligible_household_count":
+                    0,
+
+                "batch":
+                    dict(batch)
+                    if batch is not None
+                    else None,
+
+                "already_sent":
+                    batch is not None,
+            }
+
+        # -------------------------------------------------
+        # Prior-year enrolled children
+        # -------------------------------------------------
+
+        rows = conn.execute(
+            """
+            SELECT
+                h.household_id,
+                h.household_reference,
+                h.parent_a_first_name,
+                h.parent_a_last_name,
+                h.parent_a_email,
+
+                c.child_id,
+                c.first_name AS child_first_name,
+                c.last_name AS child_last_name,
+
+                ye.grade AS previous_grade
+
+            FROM households AS h
+
+            INNER JOIN children AS c
+                ON c.household_id = h.household_id
+
+            INNER JOIN yearly_enrollments AS ye
+                ON ye.child_id = c.child_id
+
+            WHERE ye.year_id = %s
+              AND ye.enrollment_status = 'enrolled'
+
+            ORDER BY
+                h.household_id,
+                c.child_id;
+            """,
+            (
+                previous_year["year_id"],
+            ),
+        ).fetchall()
+
+    # -----------------------------------------------------
+    # Group eligible children by household
+    # -----------------------------------------------------
+
+    households = {}
+
+    for row in rows:
+
+        proposed_grade = get_next_grade(
+            row["previous_grade"]
+        )
+
+        # 12th graders have no proposed next grade and
+        # therefore do not make a household renewal-eligible.
+        if proposed_grade is None:
+            continue
+
+        household_id = row["household_id"]
+
+        if household_id not in households:
+            households[household_id] = {
+                "household_id":
+                    household_id,
+
+                "household_reference":
+                    row["household_reference"],
+
+                "parent_a_first_name":
+                    row["parent_a_first_name"],
+
+                "parent_a_last_name":
+                    row["parent_a_last_name"],
+
+                "parent_a_email":
+                    row["parent_a_email"],
+
+                "children":
+                    [],
+            }
+
+        households[household_id]["children"].append(
+            {
+                "child_id":
+                    row["child_id"],
+
+                "first_name":
+                    row["child_first_name"],
+
+                "last_name":
+                    row["child_last_name"],
+
+                "previous_grade":
+                    row["previous_grade"],
+
+                "proposed_grade":
+                    proposed_grade,
+            }
+        )
+
+    eligible_households = list(
+        households.values()
+    )
+
+    return {
+        "active_year":
+            dict(active_year),
+
+        "previous_year":
+            dict(previous_year),
+
+        "eligible_households":
+            eligible_households,
+
+        "eligible_household_count":
+            len(eligible_households),
+
+        "batch":
+            dict(batch)
+            if batch is not None
+            else None,
+
+        "already_sent":
+            batch is not None,
+    }
 
 
 # ---------------------------------------------------------
@@ -3017,13 +3439,12 @@ def get_household_for_renewal(
             return None
 
         # -------------------------------------------------
-        # Most recent enrollment before active year
-        # for each child in this household
+        # Enrollment from immediately preceding year
         # -------------------------------------------------
 
         child_rows = conn.execute(
             """
-            SELECT DISTINCT ON (c.child_id)
+            SELECT
                 c.child_id,
                 c.first_name,
                 c.middle_name,
@@ -3047,12 +3468,11 @@ def get_household_for_renewal(
                 ON cy.year_id = ye.year_id
 
             WHERE c.household_id = %s
-              AND cy.start_year < %s
+              AND cy.end_year = %s
               AND ye.enrollment_status = 'enrolled'
 
             ORDER BY
-                c.child_id,
-                cy.start_year DESC;
+                c.child_id;
             """,
             (
                 household["household_id"],
@@ -5322,6 +5742,1065 @@ def renew_household(
         "children":
             results,
     }
+
+
+# ---------------------------------------------------------
+# Create renewal invitation batch
+# ---------------------------------------------------------
+
+def create_renewal_invitation_batch(
+    created_by: str,
+) -> dict:
+    """
+    Create the renewal invitation batch for the active
+    catechetical year.
+
+    This function:
+        - requires renewal to be open
+        - uses only the immediately preceding year
+        - excludes children who have completed 12th grade
+        - creates one recipient per eligible household
+        - creates the batch and recipients atomically
+        - does not send any email
+
+    Only one invitation batch may exist per
+    catechetical year.
+    """
+
+    created_by = (
+        created_by
+        or ""
+    ).strip()
+
+    if not created_by:
+        raise ValueError(
+            "The administrator creating the invitation "
+            "batch could not be identified."
+        )
+
+    with _connect() as conn:
+
+        # -------------------------------------------------
+        # Active catechetical year
+        # -------------------------------------------------
+
+        active_year = conn.execute(
+            """
+            SELECT
+                year_id,
+                name,
+                start_year,
+                end_year,
+                renewal_open
+            FROM catechetical_years
+            WHERE status = 'active'
+            FOR UPDATE;
+            """
+        ).fetchone()
+
+        if active_year is None:
+            raise ValueError(
+                "No active catechetical year was found."
+            )
+
+        if not active_year["renewal_open"]:
+            raise ValueError(
+                "Registration renewal is not currently open."
+            )
+
+        # -------------------------------------------------
+        # Prevent a second batch for this year
+        # -------------------------------------------------
+
+        existing_batch = conn.execute(
+            """
+            SELECT
+                batch_id,
+                created_at,
+                created_by,
+                household_count
+            FROM renewal_invitation_batches
+            WHERE year_id = %s;
+            """,
+            (
+                active_year["year_id"],
+            ),
+        ).fetchone()
+
+        if existing_batch is not None:
+            raise ValueError(
+                "A renewal invitation batch already exists "
+                f"for {active_year['name']}."
+            )
+
+        # -------------------------------------------------
+        # Immediately preceding catechetical year
+        # -------------------------------------------------
+
+        previous_year = conn.execute(
+            """
+            SELECT
+                year_id,
+                name,
+                start_year,
+                end_year
+            FROM catechetical_years
+            WHERE end_year = %s;
+            """,
+            (
+                active_year["start_year"],
+            ),
+        ).fetchone()
+
+        if previous_year is None:
+            raise ValueError(
+                "The immediately preceding catechetical "
+                "year could not be found."
+            )
+
+        # -------------------------------------------------
+        # Prior-year enrolled children
+        # -------------------------------------------------
+
+        rows = conn.execute(
+            """
+            SELECT
+                h.household_id,
+                h.household_reference,
+                h.parent_a_email,
+
+                c.child_id,
+
+                ye.grade AS previous_grade
+
+            FROM households AS h
+
+            INNER JOIN children AS c
+                ON c.household_id = h.household_id
+
+            INNER JOIN yearly_enrollments AS ye
+                ON ye.child_id = c.child_id
+
+            WHERE ye.year_id = %s
+              AND ye.enrollment_status = 'enrolled'
+
+            ORDER BY
+                h.household_id,
+                c.child_id;
+            """,
+            (
+                previous_year["year_id"],
+            ),
+        ).fetchall()
+
+        # -------------------------------------------------
+        # Determine eligible households
+        # -------------------------------------------------
+
+        eligible_households = {}
+
+        for row in rows:
+
+            proposed_grade = get_next_grade(
+                row["previous_grade"]
+            )
+
+            if proposed_grade is None:
+                continue
+
+            household_id = row["household_id"]
+
+            if household_id not in eligible_households:
+                eligible_households[household_id] = {
+                    "household_id":
+                        household_id,
+
+                    "household_reference":
+                        row["household_reference"],
+
+                    "email_address":
+                        (
+                            row["parent_a_email"]
+                            or ""
+                        ).strip(),
+                }
+
+        if not eligible_households:
+            raise ValueError(
+                "No households are eligible for renewal "
+                "invitations."
+            )
+
+        # -------------------------------------------------
+        # Validate recipient email addresses
+        # -------------------------------------------------
+
+        missing_email_households = [
+            household["household_reference"]
+            for household
+            in eligible_households.values()
+            if not household["email_address"]
+        ]
+
+        if missing_email_households:
+            raise ValueError(
+                "Renewal invitation batch was not created "
+                "because one or more eligible households "
+                "do not have a primary email address."
+            )
+
+        # -------------------------------------------------
+        # Create batch
+        # -------------------------------------------------
+
+        batch = conn.execute(
+            """
+            INSERT INTO renewal_invitation_batches (
+                year_id,
+                created_by,
+                household_count
+            )
+            VALUES (
+                %s,
+                %s,
+                %s
+            )
+            RETURNING
+                batch_id,
+                year_id,
+                created_at,
+                created_by,
+                household_count;
+            """,
+            (
+                active_year["year_id"],
+                created_by,
+                len(eligible_households),
+            ),
+        ).fetchone()
+
+        # -------------------------------------------------
+        # Create pending recipients
+        # -------------------------------------------------
+
+        for household in eligible_households.values():
+
+            conn.execute(
+                """
+                INSERT INTO renewal_invitation_recipients (
+                    batch_id,
+                    household_id,
+                    email_address,
+                    status
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    'pending'
+                );
+                """,
+                (
+                    batch["batch_id"],
+                    household["household_id"],
+                    household["email_address"],
+                ),
+            )
+
+    return {
+        "batch_id":
+            batch["batch_id"],
+
+        "year_id":
+            active_year["year_id"],
+
+        "year_name":
+            active_year["name"],
+
+        "previous_year_id":
+            previous_year["year_id"],
+
+        "previous_year_name":
+            previous_year["name"],
+
+        "household_count":
+            len(eligible_households),
+
+        "created_by":
+            created_by,
+    }
+
+
+# ---------------------------------------------------------
+# Renewal invitation batch status
+# ---------------------------------------------------------
+
+def get_renewal_invitation_batch_status(
+    batch_id: int,
+) -> dict:
+    """
+    Return delivery status counts for a renewal invitation
+    batch.
+    """
+
+    with _connect() as conn:
+
+        batch = conn.execute(
+            """
+            SELECT
+                rib.batch_id,
+                rib.year_id,
+                rib.created_at,
+                rib.created_by,
+                rib.household_count,
+                cy.name AS year_name
+            FROM renewal_invitation_batches AS rib
+            INNER JOIN catechetical_years AS cy
+                ON cy.year_id = rib.year_id
+            WHERE rib.batch_id = %s;
+            """,
+            (
+                batch_id,
+            ),
+        ).fetchone()
+
+        if batch is None:
+            raise ValueError(
+                "Renewal invitation batch was not found."
+            )
+
+        counts = conn.execute(
+            """
+            SELECT
+                COUNT(*) AS total,
+                COUNT(*) FILTER (
+                    WHERE status = 'pending'
+                ) AS pending,
+                COUNT(*) FILTER (
+                    WHERE status = 'sending'
+                ) AS sending,
+                COUNT(*) FILTER (
+                    WHERE status = 'sent'
+                ) AS sent,
+                COUNT(*) FILTER (
+                    WHERE status = 'failed'
+                ) AS failed
+            FROM renewal_invitation_recipients
+            WHERE batch_id = %s;
+            """,
+            (
+                batch_id,
+            ),
+        ).fetchone()
+
+    return {
+        "batch_id":
+            batch["batch_id"],
+
+        "year_id":
+            batch["year_id"],
+
+        "year_name":
+            batch["year_name"],
+
+        "created_at":
+            batch["created_at"],
+
+        "created_by":
+            batch["created_by"],
+
+        "household_count":
+            batch["household_count"],
+
+        "total":
+            counts["total"],
+
+        "pending":
+            counts["pending"],
+
+        "sending":
+            counts["sending"],
+
+        "sent":
+            counts["sent"],
+
+        "failed":
+            counts["failed"],
+    }
+
+
+# ---------------------------------------------------------
+# Failed renewal invitation recipients
+# ---------------------------------------------------------
+
+def get_failed_renewal_invitation_recipients(
+    batch_id: int,
+) -> list[dict]:
+    """
+    Return failed recipients for a renewal invitation batch
+    with household and delivery-attempt details.
+    """
+
+    with _connect() as conn:
+
+        rows = conn.execute(
+            """
+            SELECT
+                rir.recipient_id,
+                rir.household_id,
+                rir.email_address,
+                rir.attempt_count,
+                rir.last_attempt_at,
+                rir.error_message,
+                h.household_reference,
+                h.parent_a_first_name,
+                h.parent_a_last_name
+            FROM renewal_invitation_recipients AS rir
+            INNER JOIN households AS h
+                ON h.household_id = rir.household_id
+            WHERE rir.batch_id = %s
+              AND rir.status = 'failed'
+            ORDER BY
+                h.parent_a_last_name,
+                h.parent_a_first_name,
+                rir.recipient_id;
+            """,
+            (
+                batch_id,
+            ),
+        ).fetchall()
+
+    return [
+        {
+            "recipient_id":
+                row["recipient_id"],
+
+            "household_id":
+                row["household_id"],
+
+            "household_reference":
+                row["household_reference"],
+
+            "parent_first_name":
+                row["parent_a_first_name"],
+
+            "parent_last_name":
+                row["parent_a_last_name"],
+
+            "email_address":
+                row["email_address"],
+
+            "attempt_count":
+                row["attempt_count"],
+
+            "last_attempt_at":
+                row["last_attempt_at"],
+
+            "error_message":
+                row["error_message"],
+        }
+        for row in rows
+    ]
+
+
+# ---------------------------------------------------------
+# Sending renewal invitation recipients
+# ---------------------------------------------------------
+
+def get_sending_renewal_invitation_recipients(
+    batch_id: int,
+) -> list[dict]:
+    """
+    Return recipients currently marked as sending for a
+    renewal invitation batch, including household and
+    delivery-attempt details.
+    """
+
+    with _connect() as conn:
+
+        rows = conn.execute(
+            """
+            SELECT
+                rir.recipient_id,
+                rir.household_id,
+                rir.email_address,
+                rir.attempt_count,
+                rir.last_attempt_at,
+                h.household_reference,
+                h.parent_a_first_name,
+                h.parent_a_last_name
+            FROM renewal_invitation_recipients AS rir
+            INNER JOIN households AS h
+                ON h.household_id = rir.household_id
+            WHERE rir.batch_id = %s
+              AND rir.status = 'sending'
+            ORDER BY
+                h.parent_a_last_name,
+                h.parent_a_first_name,
+                rir.recipient_id;
+            """,
+            (
+                batch_id,
+            ),
+        ).fetchall()
+
+    return [
+        {
+            "recipient_id":
+                row["recipient_id"],
+
+            "household_id":
+                row["household_id"],
+
+            "household_reference":
+                row["household_reference"],
+
+            "parent_first_name":
+                row["parent_a_first_name"],
+
+            "parent_last_name":
+                row["parent_a_last_name"],
+
+            "email_address":
+                row["email_address"],
+
+            "attempt_count":
+                row["attempt_count"],
+
+            "last_attempt_at":
+                row["last_attempt_at"],
+        }
+        for row in rows
+    ]
+
+
+# ---------------------------------------------------------
+# Resolve sending renewal invitation as sent
+# ---------------------------------------------------------
+
+def resolve_sending_renewal_invitation_as_sent(
+    recipient_id: int,
+    resolved_by: str,
+) -> dict:
+    """
+    Manually resolve an ambiguous sending recipient as sent.
+
+    The recipient status change and recovery audit event are
+    committed together in one transaction.
+    """
+
+    resolved_by = (resolved_by or "").strip()
+
+    if not resolved_by:
+        raise ValueError(
+            "The administrator resolving this invitation "
+            "could not be identified."
+        )
+
+    with _connect() as conn:
+
+        recipient = conn.execute(
+            """
+            SELECT
+                recipient_id,
+                attempt_count,
+                last_attempt_at
+            FROM renewal_invitation_recipients
+            WHERE recipient_id = %s
+              AND status = 'sending'
+            FOR UPDATE;
+            """,
+            (
+                recipient_id,
+            ),
+        ).fetchone()
+
+        if recipient is None:
+            raise ValueError(
+                "This invitation is no longer marked as "
+                "sending and cannot be resolved as sent."
+            )
+
+        updated = conn.execute(
+            """
+            UPDATE renewal_invitation_recipients
+            SET
+                status = 'sent',
+                sent_at = COALESCE(
+                    last_attempt_at,
+                    CURRENT_TIMESTAMP
+                ),
+                error_message = NULL
+            WHERE recipient_id = %s
+              AND status = 'sending'
+            RETURNING
+                recipient_id,
+                batch_id,
+                household_id,
+                status,
+                attempt_count,
+                sent_at,
+                last_attempt_at;
+            """,
+            (
+                recipient_id,
+            ),
+        ).fetchone()
+
+        if updated is None:
+            raise ValueError(
+                "This invitation could not be resolved as "
+                "sent because its status changed during "
+                "recovery."
+            )
+
+        recovery_event = conn.execute(
+            """
+            INSERT INTO renewal_invitation_recovery_events (
+                recipient_id,
+                action,
+                attempt_count,
+                resolved_by
+            )
+            VALUES (
+                %s,
+                'mark_sent',
+                %s,
+                %s
+            )
+            RETURNING
+                recovery_event_id,
+                resolved_at;
+            """,
+            (
+                recipient_id,
+                recipient["attempt_count"],
+                resolved_by,
+            ),
+        ).fetchone()
+
+    return {
+        "recipient_id":
+            updated["recipient_id"],
+
+        "batch_id":
+            updated["batch_id"],
+
+        "household_id":
+            updated["household_id"],
+
+        "status":
+            updated["status"],
+
+        "attempt_count":
+            updated["attempt_count"],
+
+        "sent_at":
+            updated["sent_at"],
+
+        "last_attempt_at":
+            updated["last_attempt_at"],
+
+        "recovery_event_id":
+            recovery_event["recovery_event_id"],
+
+        "resolved_at":
+            recovery_event["resolved_at"],
+
+        "resolved_by":
+            resolved_by,
+    }
+
+
+# ---------------------------------------------------------
+# Return sending renewal invitation to pending
+# ---------------------------------------------------------
+
+def return_sending_renewal_invitation_to_pending(
+    recipient_id: int,
+    resolved_by: str,
+) -> dict:
+    """
+    Return an ambiguous sending recipient to the pending
+    queue so it may be attempted again.
+
+    The previous attempt count and last-attempt timestamp
+    are preserved. The status change and recovery audit
+    event are committed together in one transaction.
+    """
+
+    resolved_by = (resolved_by or "").strip()
+
+    if not resolved_by:
+        raise ValueError(
+            "The administrator resolving this invitation "
+            "could not be identified."
+        )
+
+    with _connect() as conn:
+
+        recipient = conn.execute(
+            """
+            SELECT
+                recipient_id,
+                attempt_count,
+                last_attempt_at
+            FROM renewal_invitation_recipients
+            WHERE recipient_id = %s
+              AND status = 'sending'
+            FOR UPDATE;
+            """,
+            (
+                recipient_id,
+            ),
+        ).fetchone()
+
+        if recipient is None:
+            raise ValueError(
+                "This invitation is no longer marked as "
+                "sending and cannot be returned to pending."
+            )
+
+        updated = conn.execute(
+            """
+            UPDATE renewal_invitation_recipients
+            SET
+                status = 'pending',
+                error_message = NULL
+            WHERE recipient_id = %s
+              AND status = 'sending'
+            RETURNING
+                recipient_id,
+                batch_id,
+                household_id,
+                status,
+                attempt_count,
+                sent_at,
+                last_attempt_at;
+            """,
+            (
+                recipient_id,
+            ),
+        ).fetchone()
+
+        if updated is None:
+            raise ValueError(
+                "This invitation could not be returned to "
+                "pending because its status changed during "
+                "recovery."
+            )
+
+        recovery_event = conn.execute(
+            """
+            INSERT INTO renewal_invitation_recovery_events (
+                recipient_id,
+                action,
+                attempt_count,
+                resolved_by
+            )
+            VALUES (
+                %s,
+                'return_pending',
+                %s,
+                %s
+            )
+            RETURNING
+                recovery_event_id,
+                resolved_at;
+            """,
+            (
+                recipient_id,
+                recipient["attempt_count"],
+                resolved_by,
+            ),
+        ).fetchone()
+
+    return {
+        "recipient_id":
+            updated["recipient_id"],
+
+        "batch_id":
+            updated["batch_id"],
+
+        "household_id":
+            updated["household_id"],
+
+        "status":
+            updated["status"],
+
+        "attempt_count":
+            updated["attempt_count"],
+
+        "sent_at":
+            updated["sent_at"],
+
+        "last_attempt_at":
+            updated["last_attempt_at"],
+
+        "recovery_event_id":
+            recovery_event["recovery_event_id"],
+
+        "resolved_at":
+            recovery_event["resolved_at"],
+
+        "resolved_by":
+            resolved_by,
+    }
+
+
+# ---------------------------------------------------------
+# Claim next renewal invitation recipient
+# ---------------------------------------------------------
+
+def claim_next_renewal_invitation_recipient(
+    batch_id: int,
+    retry_failed: bool = False,
+) -> dict | None:
+    """
+    Atomically claim the next renewal invitation recipient.
+
+    Normal processing claims only pending recipients.
+
+    When retry_failed is True, only previously failed
+    recipients are eligible to be claimed.
+
+    Claiming a recipient:
+        - changes status to 'sending'
+        - increments attempt_count
+        - records last_attempt_at
+        - clears the previous error message
+
+    Returns None when no eligible recipient remains.
+    """
+
+    allowed_statuses = (
+        ["failed"]
+        if retry_failed
+        else ["pending"]
+    )
+
+    with _connect() as conn:
+
+        recipient = conn.execute(
+            """
+            SELECT
+                rir.recipient_id,
+                rir.batch_id,
+                rir.household_id,
+                rir.email_address,
+                rir.status,
+                rir.attempt_count,
+
+                h.household_reference,
+                h.parent_a_first_name,
+                h.parent_a_last_name,
+
+                rib.year_id,
+
+                active_year.name AS active_year_name,
+                previous_year.name AS previous_year_name
+
+            FROM renewal_invitation_recipients AS rir
+
+            INNER JOIN renewal_invitation_batches AS rib
+                ON rib.batch_id = rir.batch_id
+
+            INNER JOIN households AS h
+                ON h.household_id = rir.household_id
+
+            INNER JOIN catechetical_years AS active_year
+                ON active_year.year_id = rib.year_id
+
+            INNER JOIN catechetical_years AS previous_year
+                ON previous_year.end_year =
+                   active_year.start_year
+
+            WHERE rir.batch_id = %s
+              AND rir.status = ANY(%s)
+
+            ORDER BY
+                rir.recipient_id
+
+            FOR UPDATE OF rir SKIP LOCKED
+
+            LIMIT 1;
+            """,
+            (
+                batch_id,
+                allowed_statuses,
+            ),
+        ).fetchone()
+
+        if recipient is None:
+            return None
+
+        updated = conn.execute(
+            """
+            UPDATE renewal_invitation_recipients
+            SET
+                status = 'sending',
+                attempt_count = attempt_count + 1,
+                last_attempt_at = CURRENT_TIMESTAMP,
+                error_message = NULL
+            WHERE recipient_id = %s
+            RETURNING
+                recipient_id,
+                status,
+                attempt_count,
+                last_attempt_at;
+            """,
+            (
+                recipient["recipient_id"],
+            ),
+        ).fetchone()
+
+    return {
+        "recipient_id":
+            recipient["recipient_id"],
+
+        "batch_id":
+            recipient["batch_id"],
+
+        "household_id":
+            recipient["household_id"],
+
+        "household_reference":
+            recipient["household_reference"],
+
+        "email_address":
+            recipient["email_address"],
+
+        "parent_first_name":
+            recipient["parent_a_first_name"],
+
+        "parent_last_name":
+            recipient["parent_a_last_name"],
+
+        "active_year_name":
+            recipient["active_year_name"],
+
+        "previous_year_name":
+            recipient["previous_year_name"],
+
+        "status":
+            updated["status"],
+
+        "attempt_count":
+            updated["attempt_count"],
+
+        "last_attempt_at":
+            updated["last_attempt_at"],
+    }
+
+
+# ---------------------------------------------------------
+# Mark renewal invitation sent
+# ---------------------------------------------------------
+
+def mark_renewal_invitation_sent(
+    recipient_id: int,
+) -> dict:
+    """
+    Mark a claimed renewal invitation recipient as sent.
+
+    Only a recipient currently in 'sending' status may be
+    marked as sent.
+    """
+
+    with _connect() as conn:
+
+        recipient = conn.execute(
+            """
+            UPDATE renewal_invitation_recipients
+            SET
+                status = 'sent',
+                sent_at = CURRENT_TIMESTAMP,
+                error_message = NULL
+            WHERE recipient_id = %s
+              AND status = 'sending'
+            RETURNING
+                recipient_id,
+                batch_id,
+                household_id,
+                status,
+                attempt_count,
+                sent_at,
+                last_attempt_at;
+            """,
+            (
+                recipient_id,
+            ),
+        ).fetchone()
+
+        if recipient is None:
+            raise ValueError(
+                "The renewal invitation recipient could "
+                "not be marked as sent because it is not "
+                "currently in sending status."
+            )
+
+    return dict(recipient)
+
+
+# ---------------------------------------------------------
+# Mark renewal invitation failed
+# ---------------------------------------------------------
+
+def mark_renewal_invitation_failed(
+    recipient_id: int,
+    error_message: str,
+) -> dict:
+    """
+    Mark a claimed renewal invitation recipient as failed.
+
+    The error is stored for administrative troubleshooting.
+    Only a recipient currently in 'sending' status may be
+    marked as failed.
+    """
+
+    error_message = (
+        error_message
+        or "Unknown email delivery error."
+    ).strip()
+
+    # Keep an unexpectedly large SMTP/server error from
+    # filling the database with excessive diagnostic text.
+    error_message = error_message[:2000]
+
+    with _connect() as conn:
+
+        recipient = conn.execute(
+            """
+            UPDATE renewal_invitation_recipients
+            SET
+                status = 'failed',
+                error_message = %s
+            WHERE recipient_id = %s
+              AND status = 'sending'
+            RETURNING
+                recipient_id,
+                batch_id,
+                household_id,
+                status,
+                attempt_count,
+                sent_at,
+                last_attempt_at,
+                error_message;
+            """,
+            (
+                error_message,
+                recipient_id,
+            ),
+        ).fetchone()
+
+        if recipient is None:
+            raise ValueError(
+                "The renewal invitation recipient could "
+                "not be marked as failed because it is not "
+                "currently in sending status."
+            )
+
+    return dict(recipient)
 
 
 # ---------------------------------------------------------

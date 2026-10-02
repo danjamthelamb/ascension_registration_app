@@ -13,6 +13,7 @@ from io import BytesIO
 from datetime import date, timedelta
 from pathlib import Path
 from textwrap import dedent
+from zoneinfo import ZoneInfo
 
 import pandas as pd
 import streamlit as st
@@ -40,10 +41,23 @@ from ui_theme import inject_theme
 
 
 from db import (
+    claim_next_renewal_invitation_recipient,
     create_admin_verification,
     create_household_verification,
+    create_renewal_invitation_batch,
     get_admin_roster,
     get_household_references_by_email,
+    get_household_for_renewal,
+    get_failed_renewal_invitation_recipients,
+    get_sending_renewal_invitation_recipients,
+    get_renewal_invitation_batch_status,
+    get_renewal_invitation_state,
+    get_rollover_state,
+    mark_renewal_invitation_failed,
+    mark_renewal_invitation_sent,
+    resolve_sending_renewal_invitation_as_sent,
+    return_sending_renewal_invitation_to_pending,
+    submit_household_renewal,
     get_registration_by_reference,
     get_roster_groups,
     init_db,
@@ -52,12 +66,15 @@ from db import (
     update_roster_group_details,
     verify_admin_code,
     verify_household_code,
+    rollover_catechetical_year,
 )
 
 from email_service import (
     send_admin_verification_email,
+    send_rollover_verification_email,
     send_household_id_recovery,
     send_registration_confirmation,
+    send_renewal_invitation,
     send_update_confirmation,
     send_verification_email,
 )
@@ -70,6 +87,199 @@ from email_service import (
 PROJECT_ROOT = Path(__file__).resolve().parent
 LOGO_PATH = PROJECT_ROOT / "assets" / "ascension_logo.png"
 FAITH_FORMATION_TERM = "2026-2027"
+
+
+# ---------------------------------------------------------
+# Renewal invitation delivery
+# ---------------------------------------------------------
+
+def send_next_renewal_invitation(
+    batch_id: int,
+    retry_failed: bool = False,
+) -> dict:
+    """
+    Claim and attempt delivery of one renewal invitation.
+
+    Normal processing claims only pending recipients.
+
+    When retry_failed is True, only previously failed
+    recipients are eligible for retry.
+
+    Returns a result describing whether:
+        - an invitation was sent,
+        - delivery failed, or
+        - no eligible recipients remain.
+
+    Successful recipients are marked 'sent'.
+    Failed recipients are marked 'failed'.
+    """
+
+    recipient = claim_next_renewal_invitation_recipient(
+        batch_id=batch_id,
+        retry_failed=retry_failed,
+    )
+
+    if recipient is None:
+        return {
+            "status": "empty",
+            "recipient_id": None,
+            "household_id": None,
+            "error": None,
+        }
+
+    try:
+        send_renewal_invitation(
+            recipient=recipient["email_address"],
+            parent_first_name=recipient["parent_first_name"],
+            household_reference=recipient["household_reference"],
+            previous_year_name=recipient["previous_year_name"],
+            active_year_name=recipient["active_year_name"],
+        )
+
+    except Exception as exc:
+        error_message = str(exc)
+
+        mark_renewal_invitation_failed(
+            recipient_id=recipient["recipient_id"],
+            error_message=error_message,
+        )
+
+        return {
+            "status": "failed",
+            "recipient_id": recipient["recipient_id"],
+            "household_id": recipient["household_id"],
+            "error": error_message,
+        }
+
+    mark_renewal_invitation_sent(
+        recipient_id=recipient["recipient_id"],
+    )
+
+    return {
+        "status": "sent",
+        "recipient_id": recipient["recipient_id"],
+        "household_id": recipient["household_id"],
+        "error": None,
+    }
+
+
+# ---------------------------------------------------------
+# Process renewal invitation batch
+# ---------------------------------------------------------
+
+def process_renewal_invitation_batch(
+    batch_id: int,
+    retry_failed: bool = False,
+) -> dict:
+    """
+    Process renewal invitation recipients for a batch.
+
+    Normal processing handles recipients that are pending
+    when the run begins.
+
+    Retry processing handles recipients that are failed
+    when the run begins.
+
+    The number of attempts is capped using the queue state
+    captured at the start of the run. This prevents a
+    recipient that fails from being attempted repeatedly
+    during the same processing run.
+
+    Processing is blocked when a recipient is already in
+    'sending' status so an interrupted delivery is not
+    silently retried.
+    """
+
+    starting_status = get_renewal_invitation_batch_status(
+        batch_id=batch_id,
+    )
+
+    if starting_status["sending"] > 0:
+        raise RuntimeError(
+            "This renewal invitation batch has "
+            f"{starting_status['sending']} recipient(s) "
+            "still marked as sending. Processing has been "
+            "stopped to prevent a possible duplicate email."
+        )
+
+    attempt_limit = (
+        starting_status["failed"]
+        if retry_failed
+        else starting_status["pending"]
+    )
+
+    sent_count = 0
+    failed_count = 0
+    failures = []
+
+    for _ in range(attempt_limit):
+
+        result = send_next_renewal_invitation(
+            batch_id=batch_id,
+            retry_failed=retry_failed,
+        )
+
+        if result["status"] == "empty":
+            break
+
+        if result["status"] == "sent":
+            sent_count += 1
+
+        elif result["status"] == "failed":
+            failed_count += 1
+
+            failures.append(
+                {
+                    "recipient_id":
+                        result["recipient_id"],
+
+                    "household_id":
+                        result["household_id"],
+
+                    "error":
+                        result["error"],
+                }
+            )
+
+    ending_status = get_renewal_invitation_batch_status(
+        batch_id=batch_id,
+    )
+
+    return {
+        "batch_id":
+            batch_id,
+
+        "mode":
+            (
+                "retry_failed"
+                if retry_failed
+                else "pending"
+            ),
+
+        "attempt_limit":
+            attempt_limit,
+
+        "sent_count":
+            sent_count,
+
+        "failed_count":
+            failed_count,
+
+        "processed_count":
+            sent_count + failed_count,
+
+        "remaining_pending":
+            ending_status["pending"],
+
+        "remaining_sending":
+            ending_status["sending"],
+
+        "remaining_failed":
+            ending_status["failed"],
+
+        "failures":
+            failures,
+    }
 
 
 # ---------------------------------------------------------
@@ -2520,6 +2730,9 @@ if "submitted_household_reference" not in st.session_state:
 if "registration_mode" not in st.session_state:
     st.session_state.registration_mode = None
 
+if "renewal_data" not in st.session_state:
+    st.session_state.renewal_data = None
+
 if "existing_household_id" not in st.session_state:
     st.session_state.existing_household_id = None
 
@@ -2552,6 +2765,36 @@ if "admin_authenticated" not in st.session_state:
 
 if "admin_email" not in st.session_state:
     st.session_state.admin_email = None
+
+if "show_rollover_dialog" not in st.session_state:
+    st.session_state.show_rollover_dialog = False
+
+if "rollover_verification_sent" not in st.session_state:
+    st.session_state.rollover_verification_sent = False
+
+if "rollover_verified" not in st.session_state:
+    st.session_state.rollover_verified = False
+
+if (
+    "show_renewal_invitation_send_dialog"
+    not in st.session_state
+):
+    st.session_state.show_renewal_invitation_send_dialog = False
+
+if (
+    "show_renewal_invitation_retry_dialog"
+    not in st.session_state
+):
+    st.session_state.show_renewal_invitation_retry_dialog = False
+
+if (
+    "show_renewal_invitation_sending_dialog"
+    not in st.session_state
+):
+    st.session_state.show_renewal_invitation_sending_dialog = False
+
+if "renewal_invitation_send_result" not in st.session_state:
+    st.session_state.renewal_invitation_send_result = None
 
 if "admin_detail_child_id" not in st.session_state:
     st.session_state.admin_detail_child_id = None
@@ -2897,6 +3140,840 @@ def edit_roster_dialog(
                 "Please try again."
             )
 
+# ---------------------------------------------------------
+# Catechetical year rollover dialog
+# ---------------------------------------------------------
+
+@st.dialog(
+    "Begin New Catechetical Year",
+    width="large",
+)
+def catechetical_year_rollover_dialog(
+    rollover_state: dict,
+):
+
+    current_name = (
+        rollover_state[
+            "current_name"
+        ]
+    )
+
+    next_name = (
+        rollover_state[
+            "next_name"
+        ]
+    )
+
+    st.write(
+        f"You are preparing to close **{current_name}** "
+        f"and begin **{next_name}**."
+    )
+
+    st.warning(
+        "This changes the active catechetical year for "
+        "the entire registration system."
+    )
+
+    st.markdown(
+        f"""
+**When {next_name} begins:**
+
+- **{current_name}** will be closed and preserved as historical data.
+- **{next_name}** will become the active catechetical year.
+- Returning-household renewal will open for **{next_name}**.
+- PSR, EDGE, and Life Teen class settings will carry forward.
+- Catechists and classroom assignments will carry forward.
+- **Students will not be automatically registered for the new year.**
+- Existing household, child, enrollment, and sacramental history will remain preserved.
+"""
+    )
+
+    st.info(
+        "After the rollover, returning families must "
+        "complete renewal before their children appear "
+        f"on the {next_name} rosters."
+    )
+
+    if not st.session_state.rollover_verification_sent:
+
+        confirm_rollover = st.checkbox(
+            f"I understand and want to prepare {next_name}.",
+            key="confirm_catechetical_year_rollover",
+        )
+
+        cancel_col, continue_col = (
+            st.columns(2)
+        )
+
+        with cancel_col:
+
+            if st.button(
+                "Cancel",
+                use_container_width=True,
+            ):
+
+                st.session_state.show_rollover_dialog = False
+                st.session_state.rollover_verification_sent = False
+                st.rerun()
+
+        with continue_col:
+
+            if st.button(
+                "Continue",
+                type="primary",
+                use_container_width=True,
+                disabled=not confirm_rollover,
+            ):
+
+                admin_email = (
+                    st.session_state.admin_email
+                    or ""
+                ).strip().lower()
+
+                try:
+
+                    verification = (
+                        create_admin_verification(
+                            admin_email
+                        )
+                    )
+
+                    send_rollover_verification_email(
+                        recipient=admin_email,
+                        verification_code=verification["code"],
+                        current_year=current_name,
+                        next_year=next_name,
+                        expires_minutes=verification[
+                            "expires_minutes"
+                        ],
+                    )
+
+                except Exception:
+
+                    st.error(
+                        "We couldn't send the verification "
+                        "code. Please try again."
+                    )
+
+                else:
+
+                    st.session_state.rollover_verification_sent = True
+                    st.rerun()
+
+    elif not st.session_state.rollover_verified:
+
+        st.success(
+            "A verification code was sent to "
+            f"{mask_email(st.session_state.admin_email or '')}."
+        )
+
+        st.write(
+            "Enter the code from your email to continue."
+        )
+
+        rollover_code = st.text_input(
+            "Verification Code",
+            key="rollover_verification_code",
+            max_chars=6,
+        )
+
+        st.caption(
+            "Verification does not start the new "
+            "catechetical year. You will still have one "
+            "final confirmation step."
+        )
+
+        cancel_col, verify_col = (
+            st.columns(2)
+        )
+
+        with cancel_col:
+
+            if st.button(
+                "Cancel",
+                key="cancel_rollover_verification",
+                use_container_width=True,
+            ):
+
+                st.session_state.show_rollover_dialog = False
+                st.session_state.rollover_verification_sent = False
+                st.rerun()
+
+        with verify_col:
+
+            if st.button(
+                "Verify Code",
+                key="verify_rollover_code",
+                type="primary",
+                use_container_width=True,
+                disabled=not rollover_code.strip(),
+            ):
+
+                verified, reason = (
+                    verify_admin_code(
+                        st.session_state.admin_email
+                        or "",
+                        rollover_code,
+                    )
+                )
+
+                if verified:
+
+                    st.session_state.rollover_verified = True
+                    st.rerun()
+
+                elif reason == "expired":
+
+                    st.error(
+                        "That verification code has expired. "
+                        "Cancel and begin again to request "
+                        "a new code."
+                    )
+
+                elif reason == "locked":
+
+                    st.error(
+                        "That verification code can no longer "
+                        "be used. Cancel and begin again to "
+                        "request a new code."
+                    )
+
+                elif reason == "no_active_code":
+
+                    st.error(
+                        "There is no active verification code. "
+                        "Cancel and begin again."
+                    )
+
+                else:
+
+                    st.error(
+                        "That verification code is incorrect."
+                    )
+
+    else:
+
+        st.success(
+            "Administrator identity verified."
+        )
+
+        st.subheader(
+            f"Ready to Begin {next_name}"
+        )
+
+        st.write(
+            f"The final step will close **{current_name}** "
+            f"and make **{next_name}** the active "
+            "catechetical year."
+        )
+
+        st.warning(
+            "This is the final confirmation. "
+            "Do not continue until you are ready to "
+            "open the new registration year."
+        )
+
+        cancel_col, start_col = (
+            st.columns(2)
+        )
+
+        with cancel_col:
+
+            if st.button(
+                "Cancel",
+                key="cancel_verified_rollover",
+                use_container_width=True,
+            ):
+
+                st.session_state.show_rollover_dialog = False
+                st.session_state.rollover_verification_sent = False
+                st.session_state.rollover_verified = False
+                st.rerun()
+
+        with start_col:
+
+            if st.button(
+                f"Start {next_name}",
+                key="start_catechetical_year",
+                type="primary",
+                use_container_width=True,
+            ):
+
+                admin_email = (
+                    st.session_state.admin_email
+                    or ""
+                ).strip().lower()
+
+                try:
+
+                    result = (
+                        rollover_catechetical_year(
+                            started_by=admin_email,
+                        )
+                    )
+
+                except Exception as exc:
+
+                    st.error(
+                        "The new catechetical year could "
+                        "not be started."
+                    )
+
+                    st.caption(
+                        str(exc)
+                    )
+
+                else:
+
+                    st.session_state[
+                        "rollover_result"
+                    ] = result
+
+                    st.session_state.show_rollover_dialog = False
+                    st.session_state.rollover_verification_sent = False
+                    st.session_state.rollover_verified = False
+
+                    st.rerun()
+
+# ---------------------------------------------------------
+# Renewal invitation send dialog
+# ---------------------------------------------------------
+
+@st.dialog(
+    "Send Renewal Invitations",
+    width="large",
+)
+def renewal_invitation_send_dialog(
+    batch_status: dict,
+):
+    """
+    Confirm and process the initial renewal invitation
+    campaign.
+    """
+
+    pending_count = batch_status["pending"]
+    year_name = batch_status["year_name"]
+
+    st.write(
+        f"You are preparing to send **{pending_count}** "
+        f"renewal invitation"
+        f"{'' if pending_count == 1 else 's'} "
+        f"for **{year_name}**."
+    )
+
+    st.warning(
+        "This will send real email messages to the primary "
+        "email address on each eligible household."
+    )
+
+    st.markdown(
+        """
+Each invitation will:
+
+- identify the new Faith Formation year,
+- provide the family's Household ID,
+- direct the family to choose **Returning Household**, and
+- require the normal email verification process before registration information can be accessed.
+"""
+    )
+
+    st.info(
+        "If an individual email fails, successfully sent "
+        "invitations will remain recorded as sent. Failed "
+        "invitations can be retried separately without "
+        "resending successful messages."
+    )
+
+    confirm_send = st.checkbox(
+        (
+            f"I understand that this will send "
+            f"{pending_count} real renewal invitation"
+            f"{'' if pending_count == 1 else 's'}."
+        ),
+        key="confirm_renewal_invitation_send",
+    )
+
+    cancel_col, send_col = st.columns(2)
+
+    with cancel_col:
+
+        if st.button(
+            "Cancel",
+            key="cancel_renewal_invitation_send",
+            use_container_width=True,
+        ):
+
+            st.session_state[
+                "show_renewal_invitation_send_dialog"
+            ] = False
+
+            st.rerun()
+
+    with send_col:
+
+        if st.button(
+            "Send Invitations",
+            key="confirm_send_renewal_invitations",
+            type="primary",
+            use_container_width=True,
+            disabled=not confirm_send,
+        ):
+
+            try:
+                with st.spinner(
+                    "Sending renewal invitations..."
+                ):
+                    result = (
+                        process_renewal_invitation_batch(
+                            batch_id=batch_status[
+                                "batch_id"
+                            ],
+                            retry_failed=False,
+                        )
+                    )
+
+            except Exception as exc:
+
+                st.error(
+                    "The invitation campaign could not "
+                    "continue. No additional invitations "
+                    "will be attempted until the issue is "
+                    "reviewed."
+                )
+
+                st.caption(
+                    str(exc)
+                )
+
+            else:
+
+                st.session_state[
+                    "renewal_invitation_send_result"
+                ] = result
+
+                st.session_state[
+                    "show_renewal_invitation_send_dialog"
+                ] = False
+
+                st.rerun()
+
+
+# ---------------------------------------------------------
+# Renewal invitation retry dialog
+# ---------------------------------------------------------
+
+@st.dialog(
+    "Retry Failed Renewal Invitations",
+    width="large",
+)
+def renewal_invitation_retry_dialog(
+    batch_status: dict,
+):
+    """
+    Confirm and retry only failed renewal invitations.
+    """
+
+    failed_count = batch_status["failed"]
+    year_name = batch_status["year_name"]
+
+    st.write(
+        f"You are preparing to retry **{failed_count}** "
+        f"failed renewal invitation"
+        f"{'' if failed_count == 1 else 's'} "
+        f"for **{year_name}**."
+    )
+
+    st.warning(
+        "This will send real email messages, but only to "
+        "households whose previous invitation attempt is "
+        "currently marked as failed."
+    )
+
+    st.markdown(
+        """
+**This retry will not resend successful invitations.**
+
+Recipients already marked as **Sent** are excluded. Only invitations currently marked as **Failed** are eligible for this retry.
+"""
+    )
+
+    st.info(
+        "If an invitation fails again, it will remain "
+        "recorded as failed and can be reviewed or retried "
+        "again later."
+    )
+
+    failed_recipients = (
+        get_failed_renewal_invitation_recipients(
+            batch_id=batch_status["batch_id"],
+        )
+    )
+
+    st.markdown("### Failed Invitations")
+
+    for failed_recipient in failed_recipients:
+
+        parent_name = " ".join(
+            part
+            for part in (
+                failed_recipient["parent_first_name"],
+                failed_recipient["parent_last_name"],
+            )
+            if part
+        )
+
+        household_label = (
+            f"{parent_name} Household"
+            if parent_name
+            else "Household"
+        )
+
+        last_attempt = failed_recipient[
+            "last_attempt_at"
+        ]
+
+        if last_attempt is not None:
+
+            eastern_attempt = last_attempt.astimezone(
+                ZoneInfo("America/New_York")
+            )
+
+            last_attempt_text = eastern_attempt.strftime(
+                "%b %d, %Y · %I:%M %p"
+            )
+
+        else:
+            last_attempt_text = (
+                "No attempt time recorded"
+            )
+
+        st.markdown(
+            f"""
+**{household_label}**  
+Household ID: `{failed_recipient["household_reference"]}`  
+Email: {failed_recipient["email_address"]}  
+Attempt: **{failed_recipient["attempt_count"]}** · {last_attempt_text}
+"""
+        )
+
+        if failed_recipient["error_message"]:
+
+            st.caption(
+                "Failure: "
+                + failed_recipient["error_message"]
+            )
+
+    st.divider()
+
+    confirm_retry = st.checkbox(
+        (
+            f"I understand that this will retry "
+            f"{failed_count} failed renewal invitation"
+            f"{'' if failed_count == 1 else 's'}."
+        ),
+        key="confirm_renewal_invitation_retry",
+    )
+
+    cancel_col, retry_col = st.columns(2)
+
+    with cancel_col:
+
+        if st.button(
+            "Cancel",
+            key="cancel_renewal_invitation_retry",
+            use_container_width=True,
+        ):
+
+            st.session_state[
+                "show_renewal_invitation_retry_dialog"
+            ] = False
+
+            st.rerun()
+
+    with retry_col:
+
+        if st.button(
+            "Retry Failed Invitations",
+            key="confirm_retry_renewal_invitations",
+            type="primary",
+            use_container_width=True,
+            disabled=not confirm_retry,
+        ):
+
+            try:
+                with st.spinner(
+                    "Retrying failed renewal invitations..."
+                ):
+                    result = (
+                        process_renewal_invitation_batch(
+                            batch_id=batch_status[
+                                "batch_id"
+                            ],
+                            retry_failed=True,
+                        )
+                    )
+
+            except Exception as exc:
+
+                st.error(
+                    "The retry could not continue. No "
+                    "additional failed invitations will be "
+                    "attempted until the issue is reviewed."
+                )
+
+                st.caption(
+                    str(exc)
+                )
+
+            else:
+
+                st.session_state[
+                    "renewal_invitation_send_result"
+                ] = result
+
+                st.session_state[
+                    "show_renewal_invitation_retry_dialog"
+                ] = False
+
+                st.rerun()
+
+
+# ---------------------------------------------------------
+# Renewal invitation sending review dialog
+# ---------------------------------------------------------
+
+@st.dialog(
+    "Review Sending Invitation",
+    width="large",
+)
+def renewal_invitation_sending_dialog(
+    batch_status: dict,
+):
+    """
+    Review renewal invitations left in an ambiguous
+    sending state after an interrupted delivery attempt.
+    """
+
+    sending_recipients = (
+        get_sending_renewal_invitation_recipients(
+            batch_id=batch_status["batch_id"],
+        )
+    )
+
+    if not sending_recipients:
+
+        st.success(
+            "There are no invitations currently marked "
+            "as sending."
+        )
+
+        if st.button(
+            "Close",
+            key="close_empty_sending_review",
+            use_container_width=True,
+        ):
+
+            st.session_state[
+                "show_renewal_invitation_sending_dialog"
+            ] = False
+
+            st.rerun()
+
+        return
+
+    st.warning(
+        "Delivery was interrupted while the invitation"
+        f"{'' if len(sending_recipients) == 1 else 's'} "
+        f"{'was' if len(sending_recipients) == 1 else 'were'} "
+        "marked as sending."
+    )
+
+    st.markdown(
+        """
+The system cannot safely determine whether these email messages were actually delivered.
+
+To prevent an accidental duplicate email, additional renewal invitation delivery remains paused until each sending record is reviewed.
+"""
+    )
+
+    for sending_recipient in sending_recipients:
+
+        parent_name = " ".join(
+            part
+            for part in (
+                sending_recipient["parent_first_name"],
+                sending_recipient["parent_last_name"],
+            )
+            if part
+        )
+
+        household_label = (
+            f"{parent_name} Household"
+            if parent_name
+            else "Household"
+        )
+
+        last_attempt = sending_recipient[
+            "last_attempt_at"
+        ]
+
+        if last_attempt is not None:
+
+            eastern_attempt = last_attempt.astimezone(
+                ZoneInfo("America/New_York")
+            )
+
+            last_attempt_text = eastern_attempt.strftime(
+                "%b %d, %Y · %I:%M %p"
+            )
+
+        else:
+            last_attempt_text = (
+                "No attempt time recorded"
+            )
+
+        st.markdown(
+            f"""
+### {household_label}
+
+Household ID: `{sending_recipient["household_reference"]}`  
+Email: {sending_recipient["email_address"]}  
+Attempt: **{sending_recipient["attempt_count"]}** · {last_attempt_text}
+"""
+        )
+
+        st.info(
+            "If you can independently confirm that this "
+            "household received the invitation, it can be "
+            "marked as sent."
+        )
+
+        st.warning(
+            "Returning this invitation to Pending will "
+            "allow the system to send it again. Because "
+            "the previous delivery may actually have "
+            "succeeded, doing so could result in the "
+            "household receiving a duplicate email."
+        )
+
+        recipient_id = sending_recipient[
+            "recipient_id"
+        ]
+
+        confirmed_received = st.checkbox(
+            (
+                "I have independently confirmed that this "
+                "household received the invitation."
+            ),
+            key=(
+                "confirm_invitation_received_"
+                f"{recipient_id}"
+            ),
+        )
+
+        duplicate_acknowledged = st.checkbox(
+            (
+                "I understand that returning this invitation "
+                "to Pending may result in a duplicate email."
+            ),
+            key=(
+                "confirm_invitation_duplicate_risk_"
+                f"{recipient_id}"
+            ),
+        )
+
+        mark_col, pending_col = st.columns(2)
+
+        with mark_col:
+
+            if st.button(
+                "Mark as Sent",
+                key=(
+                    "review_mark_invitation_sent_"
+                    f"{recipient_id}"
+                ),
+                use_container_width=True,
+                disabled=not confirmed_received,
+            ):
+
+                try:
+
+                    resolve_sending_renewal_invitation_as_sent(
+                        recipient_id=recipient_id,
+                        resolved_by=(
+                            st.session_state.admin_email
+                        ),
+                    )
+
+                except Exception as exc:
+
+                    st.error(
+                        "The invitation could not be marked "
+                        "as sent."
+                    )
+
+                    st.exception(exc)
+
+                else:
+
+                    st.session_state[
+                        "show_renewal_invitation_sending_dialog"
+                    ] = False
+
+                    st.rerun()
+
+        with pending_col:
+
+            if st.button(
+                "Return to Pending",
+                key=(
+                    "review_return_invitation_pending_"
+                    f"{recipient_id}"
+                ),
+                use_container_width=True,
+                disabled=not duplicate_acknowledged,
+            ):
+
+                try:
+
+                    return_sending_renewal_invitation_to_pending(
+                        recipient_id=recipient_id,
+                        resolved_by=(
+                            st.session_state.admin_email
+                        ),
+                    )
+
+                except Exception as exc:
+
+                    st.error(
+                        "The invitation could not be returned "
+                        "to Pending."
+                    )
+
+                    st.exception(exc)
+
+                else:
+
+                    st.session_state[
+                        "show_renewal_invitation_sending_dialog"
+                    ] = False
+
+                    st.rerun()
+
+        st.divider()
+
+    if st.button(
+        "Close",
+        key="close_sending_invitation_review",
+        use_container_width=True,
+    ):
+
+        st.session_state[
+            "show_renewal_invitation_sending_dialog"
+        ] = False
+
+        st.rerun()
+
 
 # ---------------------------------------------------------
 # Admin child detail dialog
@@ -3179,6 +4256,13 @@ def admin_child_detail_dialog(
         or "—"
     )
 
+    confirmation = (
+        child.get(
+            "confirmation_status"
+        )
+        or "—"
+    )
+
     st.write(
         f"**Baptized:** "
         f"{baptism}"
@@ -3192,6 +4276,11 @@ def admin_child_detail_dialog(
     st.write(
         f"**First Communion:** "
         f"{communion}"
+    )
+
+    st.write(
+        f"**Confirmation:** "
+        f"{confirmation}"
     )
 
     follow_up_reasons = (
@@ -3522,6 +4611,270 @@ def existing_household_dialog():
                 )
 
             return
+
+        # -------------------------------------------------
+        # Determine whether this household is returning
+        # to an active registration or beginning renewal
+        # -------------------------------------------------
+
+        renewal_result = (
+            get_household_for_renewal(
+                household_reference
+            )
+        )
+
+        if (
+            renewal_result is not None
+            and renewal_result.get(
+                "active_year",
+                {},
+            ).get(
+                "renewal_open",
+                False,
+            )
+            and any(
+                child.get(
+                    "eligible_for_renewal",
+                    False,
+                )
+                for child
+                in renewal_result.get(
+                    "children",
+                    [],
+                )
+            )
+        ):
+
+            st.session_state.registration_mode = (
+                "renewal"
+            )
+
+            st.session_state.existing_household_reference = (
+                household_reference
+            )
+
+            st.session_state.renewal_data = (
+                renewal_result
+            )
+
+            renewal_household = (
+                renewal_result.get(
+                    "household",
+                    {}
+                )
+            )
+
+            st.session_state.household = {
+                "parent_a_first_name":
+                    renewal_household.get(
+                        "parent_a_first_name"
+                    )
+                    or "",
+
+                "parent_a_last_name":
+                    renewal_household.get(
+                        "parent_a_last_name"
+                    )
+                    or "",
+
+                "parent_a_email":
+                    renewal_household.get(
+                        "parent_a_email"
+                    )
+                    or "",
+
+                "parent_a_phone":
+                    renewal_household.get(
+                        "parent_a_phone"
+                    )
+                    or "",
+
+                "parent_b_first_name":
+                    renewal_household.get(
+                        "parent_b_first_name"
+                    )
+                    or "",
+
+                "parent_b_last_name":
+                    renewal_household.get(
+                        "parent_b_last_name"
+                    )
+                    or "",
+
+                "parent_b_email":
+                    renewal_household.get(
+                        "parent_b_email"
+                    )
+                    or "",
+
+                "parent_b_phone":
+                    renewal_household.get(
+                        "parent_b_phone"
+                    )
+                    or "",
+
+                "address_line_1":
+                    renewal_household.get(
+                        "address_line_1"
+                    )
+                    or "",
+
+                "address_line_2":
+                    renewal_household.get(
+                        "address_line_2"
+                    )
+                    or "",
+
+                "city":
+                    renewal_household.get(
+                        "city"
+                    )
+                    or "",
+
+                "state":
+                    renewal_household.get(
+                        "state"
+                    )
+                    or "",
+
+                "zip_code":
+                    renewal_household.get(
+                        "zip_code"
+                    )
+                    or "",
+
+                "emergency_contact_name":
+                    renewal_household.get(
+                        "emergency_contact_name"
+                    )
+                    or "",
+
+                "emergency_contact_relationship":
+                    renewal_household.get(
+                        "emergency_contact_relationship"
+                    )
+                    or "",
+
+                "emergency_contact_phone":
+                    renewal_household.get(
+                        "emergency_contact_phone"
+                    )
+                    or "",
+            }
+
+            st.session_state.children = []
+
+            for renewal_child in (
+                renewal_result.get(
+                    "children",
+                    []
+                )
+            ):
+
+                proposed_grade = (
+                    renewal_child.get(
+                        "proposed_grade"
+                    )
+                )
+
+                previous_school = (
+                    renewal_child.get(
+                        "previous_school"
+                    )
+                    or ""
+                )
+
+                st.session_state.children.append(
+                    {
+                        "child_id":
+                            renewal_child.get(
+                                "child_id"
+                            ),
+
+                        "first_name":
+                            renewal_child.get(
+                                "first_name"
+                            )
+                            or "",
+
+                        "middle_name":
+                            renewal_child.get(
+                                "middle_name"
+                            )
+                            or "",
+
+                        "last_name":
+                            renewal_child.get(
+                                "last_name"
+                            )
+                            or "",
+
+                        "date_of_birth":
+                            renewal_child.get(
+                                "date_of_birth"
+                            ),
+
+                        "previous_grade":
+                            renewal_child.get(
+                                "previous_grade"
+                            ),
+
+                        "grade":
+                            proposed_grade
+                            or "",
+
+                        "school":
+                            previous_school,
+
+                        "already_enrolled":
+                            renewal_child.get(
+                                "already_enrolled",
+                                False,
+                            ),
+
+                        "eligible_for_renewal":
+                            renewal_child.get(
+                                "eligible_for_renewal",
+                                False,
+                            ),
+
+                        "renew_for_active_year":
+                            renewal_child.get(
+                                "eligible_for_renewal",
+                                False,
+                            ),
+
+                        "renewal_reviewed":
+                            False,
+
+                        "sacraments":
+                            renewal_child.get(
+                                "sacraments",
+                                [],
+                            ),
+
+                        "sacrament_review":
+                            renewal_child.get(
+                                "sacrament_review",
+                                {},
+                            ),
+
+                        "receiving_first_communion_reconciliation":
+                            False,
+
+                        "receiving_confirmation":
+                            False,
+
+                        "sacraments_to_record":
+                            [],
+                    }
+                )
+
+            clear_verification_state()
+            clear_recovery_state()
+            clear_admin_login_state()
+
+            st.rerun()
 
         result = (
             get_registration_by_reference(
@@ -4393,83 +5746,46 @@ def child_dialog(
     st.divider()
 
     st.subheader(
-        "Sacrament Preparation"
+        "Sacramental History"
     )
 
     st.caption(
-        "Select any sacraments this child is preparing "
-        "to receive this year."
+        "Please tell us which sacraments this child "
+        "has already received."
     )
 
-    receiving_first_communion_reconciliation = (
-        st.toggle(
-            "Receiving First Reconciliation / "
-            "First Communion this year",
-            value=child.get(
-                "receiving_first_communion_reconciliation",
-                False,
+    baptism_status = (
+        st.selectbox(
+            "Has this child been baptized?",
+            sacrament_status_options,
+            index=sacrament_status_index(
+                child.get(
+                    "baptism_status"
+                )
             ),
         )
     )
 
-    receiving_confirmation = (
-        st.toggle(
-            "Receiving Confirmation this year",
-            value=child.get(
-                "receiving_confirmation",
-                False,
-            ),
-        )
-    )
-
-    baptism_status = None
     first_reconciliation_status = None
     first_communion_status = None
+    confirmation_status = None
 
-    sacramental_history_needed = (
-        receiving_first_communion_reconciliation
-        or receiving_confirmation
-    )
+    if baptism_status == "Yes":
 
-    if sacramental_history_needed:
-
-        st.divider()
-
-        st.subheader(
-            "Sacramental History"
-        )
-
-        st.caption(
-            "Please tell us which sacraments this child "
-            "has already received."
-        )
-
-        baptism_status = (
+        first_reconciliation_status = (
             st.selectbox(
-                "Has this child been baptized?",
+                "Has this child received "
+                "First Reconciliation?",
                 sacrament_status_options,
                 index=sacrament_status_index(
                     child.get(
-                        "baptism_status"
+                        "first_reconciliation_status"
                     )
                 ),
             )
         )
 
-        if receiving_confirmation:
-
-            first_reconciliation_status = (
-                st.selectbox(
-                    "Has this child received "
-                    "First Reconciliation?",
-                    sacrament_status_options,
-                    index=sacrament_status_index(
-                        child.get(
-                            "first_reconciliation_status"
-                        )
-                    ),
-                )
-            )
+        if first_reconciliation_status == "Yes":
 
             first_communion_status = (
                 st.selectbox(
@@ -4484,75 +5800,167 @@ def child_dialog(
                 )
             )
 
-        preview_child = {
-            "receiving_first_communion_reconciliation":
-                receiving_first_communion_reconciliation,
+            if first_communion_status == "Yes":
 
-            "receiving_confirmation":
-                receiving_confirmation,
-
-            "baptism_status":
-                (
-                    None
-                    if baptism_status
-                    == "Select one"
-                    else baptism_status
-                ),
-
-            "first_reconciliation_status":
-                (
-                    None
-                    if first_reconciliation_status
-                    in (
-                        None,
-                        "Select one",
+                confirmation_status = (
+                    st.selectbox(
+                        "Has this child received "
+                        "Confirmation?",
+                        sacrament_status_options,
+                        index=sacrament_status_index(
+                            child.get(
+                                "confirmation_status"
+                            )
+                        ),
                     )
-                    else first_reconciliation_status
-                ),
+                )
 
-            "first_communion_status":
-                (
-                    None
-                    if first_communion_status
-                    in (
-                        None,
-                        "Select one",
-                    )
-                    else first_communion_status
-                ),
-        }
+    baptism_received = (
+        baptism_status == "Yes"
+    )
 
-        follow_up_reasons = (
-            sacramental_follow_up_reasons(
-                preview_child
+    first_reconciliation_received = (
+        first_reconciliation_status == "Yes"
+    )
+
+    first_communion_received = (
+        first_communion_status == "Yes"
+    )
+
+    confirmation_received = (
+        confirmation_status == "Yes"
+    )
+
+    show_fcr_prep = (
+        baptism_received
+        and not (
+            first_reconciliation_received
+            and first_communion_received
+        )
+    )
+
+    show_confirmation_prep = (
+        baptism_received
+        and first_reconciliation_received
+        and first_communion_received
+        and not confirmation_received
+    )
+
+    if (
+        show_fcr_prep
+        or show_confirmation_prep
+    ):
+
+        st.divider()
+
+        st.subheader(
+            "Sacrament Preparation"
+        )
+
+        st.caption(
+            "Select any sacraments this child is preparing "
+            "to receive this year."
+        )
+
+    if show_fcr_prep:
+
+        receiving_first_communion_reconciliation = (
+            st.toggle(
+                "Receiving First Reconciliation / "
+                "First Communion this year",
+                value=child.get(
+                    "receiving_first_communion_reconciliation",
+                    False,
+                ),
             )
         )
 
-        history_questions_complete = (
-            baptism_status
-            != "Select one"
+    else:
+
+        receiving_first_communion_reconciliation = (
+            False
         )
 
-        if receiving_confirmation:
+    if show_confirmation_prep:
 
-            history_questions_complete = (
-                history_questions_complete
-                and first_reconciliation_status
-                != "Select one"
-                and first_communion_status
-                != "Select one"
+        receiving_confirmation = (
+            st.toggle(
+                "Receiving Confirmation this year",
+                value=child.get(
+                    "receiving_confirmation",
+                    False,
+                ),
             )
+        )
 
-        if (
-            history_questions_complete
-            and follow_up_reasons
-        ):
+    else:
 
-            st.warning(
-                "This registration will need sacramental follow-up. "
-                "You can still continue normally. A member of the "
-                "faith formation team will contact you if needed."
-            )
+        receiving_confirmation = (
+            False
+        )
+
+    preview_child = {
+        "receiving_first_communion_reconciliation":
+            receiving_first_communion_reconciliation,
+
+        "receiving_confirmation":
+            receiving_confirmation,
+
+        "baptism_status":
+            (
+                None
+                if baptism_status
+                == "Select one"
+                else baptism_status
+            ),
+
+        "first_reconciliation_status":
+            (
+                None
+                if first_reconciliation_status
+                in (
+                    None,
+                    "Select one",
+                )
+                else first_reconciliation_status
+            ),
+
+        "first_communion_status":
+            (
+                None
+                if first_communion_status
+                in (
+                    None,
+                    "Select one",
+                )
+                else first_communion_status
+            ),
+
+        "confirmation_status":
+            (
+                None
+                if confirmation_status
+                in (
+                    None,
+                    "Select one",
+                )
+                else confirmation_status
+            ),
+    }
+
+    follow_up_reasons = (
+        sacramental_follow_up_reasons(
+            preview_child
+        )
+    )
+
+    if follow_up_reasons:
+
+        st.warning(
+            "This registration may need sacramental follow-up. "
+            "You can still continue normally. A member of the "
+            "faith formation team will contact you if needed."
+        )
 
     st.divider()
 
@@ -4603,79 +6011,42 @@ def child_dialog(
             )
             return
 
-        if sacramental_history_needed:
+        saved_baptism_status = (
+            None
+            if baptism_status
+            == "Select one"
+            else baptism_status
+        )
 
-            if (
-                baptism_status
-                == "Select one"
-            ):
-
-                st.error(
-                    "Please tell us whether this child has been baptized."
-                )
-                return
-
-        if receiving_confirmation:
-
-            if (
-                first_reconciliation_status
-                == "Select one"
-            ):
-
-                st.error(
-                    "Please tell us whether this child has received "
-                    "First Reconciliation."
-                )
-                return
-
-            if (
-                first_communion_status
-                == "Select one"
-            ):
-
-                st.error(
-                    "Please tell us whether this child has received "
-                    "First Communion."
-                )
-                return
-
-        if sacramental_history_needed:
-
-            saved_baptism_status = (
-                baptism_status
+        saved_first_reconciliation_status = (
+            None
+            if first_reconciliation_status
+            in (
+                None,
+                "Select one",
             )
+            else first_reconciliation_status
+        )
 
-        else:
-
-            saved_baptism_status = (
-                child.get(
-                    "baptism_status"
-                )
+        saved_first_communion_status = (
+            None
+            if first_communion_status
+            in (
+                None,
+                "Select one",
             )
+            else first_communion_status
+        )
 
-        if receiving_confirmation:
-
-            saved_first_reconciliation_status = (
-                first_reconciliation_status
+        saved_confirmation_status = (
+            None
+            if confirmation_status
+            in (
+                None,
+                "Select one",
             )
-
-            saved_first_communion_status = (
-                first_communion_status
-            )
-
-        else:
-
-            saved_first_reconciliation_status = (
-                child.get(
-                    "first_reconciliation_status"
-                )
-            )
-
-            saved_first_communion_status = (
-                child.get(
-                    "first_communion_status"
-                )
-            )
+            else confirmation_status
+        )
 
         child_data = {
             "first_name":
@@ -4710,6 +6081,9 @@ def child_dialog(
 
             "first_communion_status":
                 saved_first_communion_status,
+
+            "confirmation_status":
+                saved_confirmation_status,
         }
 
         if (
@@ -4737,6 +6111,1039 @@ def child_dialog(
             st.session_state.children.append(
                 child_data
             )
+
+        st.rerun()
+
+
+# ---------------------------------------------------------
+# Renewal child dialog
+# ---------------------------------------------------------
+
+@st.dialog("Review Child Information")
+def renewal_child_dialog(
+    child_index: int,
+):
+
+    child = (
+        st.session_state.children[
+            child_index
+        ]
+    )
+
+    grades = [
+        "Select grade",
+        "Pre-K",
+        "K",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "6",
+        "7",
+        "8",
+        "9",
+        "10",
+        "11",
+        "12",
+    ]
+
+    existing_grade = (
+        child.get(
+            "grade",
+            "Select grade",
+        )
+        or "Select grade"
+    )
+
+    try:
+
+        grade_index = (
+            grades.index(
+                existing_grade
+            )
+        )
+
+    except ValueError:
+
+        grade_index = 0
+
+    # -----------------------------------------------------
+    # Basic information
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Basic Information"
+    )
+
+    st.caption(
+        "Please review this information and make any "
+        "needed corrections."
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        first_name = (
+            st.text_input(
+                "First name",
+                value=child.get(
+                    "first_name",
+                    "",
+                ),
+            )
+        )
+
+    with col2:
+
+        middle_name = (
+            st.text_input(
+                "Middle name",
+                value=child.get(
+                    "middle_name",
+                    "",
+                ),
+            )
+        )
+
+    last_name = (
+        st.text_input(
+            "Last name",
+            value=child.get(
+                "last_name",
+                "",
+            ),
+        )
+    )
+
+    today = date.today()
+
+    earliest_birth_date = date(
+        today.year - 20,
+        1,
+        1,
+    )
+
+    date_of_birth = (
+        st.date_input(
+            "Date of birth",
+            value=child.get(
+                "date_of_birth",
+                None,
+            ),
+            min_value=earliest_birth_date,
+            max_value=today,
+        )
+    )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # New-year enrollment
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Faith Formation Enrollment"
+    )
+
+    renew_for_active_year = (
+        st.toggle(
+            "Register this child for the new "
+            "Faith Formation year",
+            value=child.get(
+                "renew_for_active_year",
+                True,
+            ),
+        )
+    )
+
+    if renew_for_active_year:
+
+        grade = st.selectbox(
+            "Grade for the new school year",
+            grades,
+            index=grade_index,
+        )
+
+        school = st.text_input(
+            "School for the new school year",
+            value=child.get(
+                "school",
+                "",
+            ),
+        )
+
+    else:
+
+        grade = (
+            child.get(
+                "grade",
+                "",
+            )
+        )
+
+        school = (
+            child.get(
+                "school",
+                "",
+            )
+        )
+
+        st.info(
+            "This child's information will remain with "
+            "the household, but they will not be registered "
+            "for the new Faith Formation year."
+        )
+
+    # -----------------------------------------------------
+    # Sacramental history
+    # -----------------------------------------------------
+
+    if renew_for_active_year:
+
+        st.divider()
+
+        st.subheader(
+            "Sacramental History"
+        )
+
+        sacraments = (
+            child.get(
+                "sacraments",
+                []
+            )
+            or []
+        )
+
+        recorded_sacraments = {
+            sacrament.get(
+                "sacrament"
+            )
+            for sacrament in sacraments
+            if sacrament.get(
+                "received",
+                False,
+            )
+        }
+
+        sacrament_display_order = [
+            "Baptism",
+            "First Reconciliation",
+            "First Communion",
+            "Confirmation",
+        ]
+
+        # -------------------------------------------------
+        # Determine prior-year completion questions
+        # -------------------------------------------------
+
+        sacrament_review = (
+            child.get(
+                "sacrament_review",
+                {}
+            )
+            or {}
+        )
+
+        completion_questions = []
+
+        completion_question_map = [
+            (
+                "first_reconciliation",
+                "First Reconciliation",
+            ),
+            (
+                "first_communion",
+                "First Communion",
+            ),
+            (
+                "confirmation",
+                "Confirmation",
+            ),
+        ]
+
+        for (
+            review_key,
+            sacrament_name,
+        ) in completion_question_map:
+
+            review_item = (
+                sacrament_review.get(
+                    review_key,
+                    {}
+                )
+                or {}
+            )
+
+            if review_item.get(
+                "needs_completion_confirmation",
+                False,
+            ):
+
+                completion_questions.append(
+                    sacrament_name
+                )
+
+        completion_answers = {}
+
+        # -------------------------------------------------
+        # Show what is already known
+        # -------------------------------------------------
+
+        if recorded_sacraments:
+
+            st.caption(
+                "Our records show that this child has "
+                "received:"
+            )
+
+            for sacrament_name in (
+                sacrament_display_order
+            ):
+
+                if (
+                    sacrament_name
+                    in recorded_sacraments
+                ):
+
+                    st.write(
+                        f"✓ {sacrament_name}"
+                    )
+
+            missing_history_exists = (
+                len(recorded_sacraments) < 4
+            )
+
+            if missing_history_exists:
+
+                st.caption(
+                    "Please review the remaining questions "
+                    "below to help us keep this child's "
+                    "sacramental history up to date."
+                )
+
+        else:
+
+            st.info(
+                "We do not currently have any received "
+                "sacraments recorded for this child."
+            )
+
+            st.caption(
+                "This does not mean the child has not "
+                "received any sacraments. Please review "
+                "the questions below to help us bring "
+                "our records up to date."
+            )
+
+        # -------------------------------------------------
+        # Missing sacramental history
+        # -------------------------------------------------
+
+        history_options = [
+            "Select one",
+            "Yes",
+            "No",
+            "I'm not sure",
+        ]
+
+        baptism_recorded = (
+            "Baptism"
+            in recorded_sacraments
+        )
+
+        reconciliation_recorded = (
+            "First Reconciliation"
+            in recorded_sacraments
+        )
+
+        communion_recorded = (
+            "First Communion"
+            in recorded_sacraments
+        )
+
+        confirmation_recorded = (
+            "Confirmation"
+            in recorded_sacraments
+        )
+
+        baptism_history_answer = None
+        reconciliation_history_answer = None
+        communion_history_answer = None
+        confirmation_history_answer = None
+
+        # -------------------------------------------------
+        # Baptism
+        # -------------------------------------------------
+
+        if baptism_recorded:
+
+            baptism_received_for_history = True
+
+        else:
+
+            existing_baptism_answer = (
+                child.get(
+                    "baptism_history_answer"
+                )
+            )
+
+            baptism_index = (
+                history_options.index(
+                    existing_baptism_answer
+                )
+                if existing_baptism_answer
+                in history_options
+                else 0
+            )
+
+            baptism_history_answer = (
+                st.selectbox(
+                    f"Has {first_name} been baptized?",
+                    history_options,
+                    index=baptism_index,
+                    key=(
+                        f"renewal_baptism_"
+                        f"{child.get('child_id')}"
+                    ),
+                )
+            )
+
+            baptism_received_for_history = (
+                baptism_history_answer
+                == "Yes"
+            )
+
+        # -------------------------------------------------
+        # First Reconciliation
+        # -------------------------------------------------
+
+        if baptism_received_for_history:
+
+            if reconciliation_recorded:
+
+                reconciliation_received_for_history = True
+
+            elif (
+                "First Reconciliation"
+                in completion_questions
+            ):
+
+                reconciliation_received_for_history = False
+
+            else:
+
+                existing_reconciliation_answer = (
+                    child.get(
+                        "reconciliation_history_answer"
+                    )
+                )
+
+                reconciliation_index = (
+                    history_options.index(
+                        existing_reconciliation_answer
+                    )
+                    if existing_reconciliation_answer
+                    in history_options
+                    else 0
+                )
+
+                reconciliation_history_answer = (
+                    st.selectbox(
+                        (
+                            f"Has {first_name} received "
+                            "First Reconciliation?"
+                        ),
+                        history_options,
+                        index=reconciliation_index,
+                        key=(
+                            f"renewal_reconciliation_"
+                            f"{child.get('child_id')}"
+                        ),
+                    )
+                )
+
+                reconciliation_received_for_history = (
+                    reconciliation_history_answer
+                    == "Yes"
+                )
+
+        else:
+
+            reconciliation_received_for_history = (
+                reconciliation_recorded
+            )
+
+        # -------------------------------------------------
+        # First Communion
+        # -------------------------------------------------
+
+        if baptism_received_for_history:
+
+            if communion_recorded:
+
+                communion_received_for_history = True
+
+            elif (
+                "First Communion"
+                in completion_questions
+            ):
+
+                communion_received_for_history = False
+
+            else:
+
+                existing_communion_answer = (
+                    child.get(
+                        "communion_history_answer"
+                    )
+                )
+
+                communion_index = (
+                    history_options.index(
+                        existing_communion_answer
+                    )
+                    if existing_communion_answer
+                    in history_options
+                    else 0
+                )
+
+                communion_history_answer = (
+                    st.selectbox(
+                        (
+                            f"Has {first_name} received "
+                            "First Communion?"
+                        ),
+                        history_options,
+                        index=communion_index,
+                        key=(
+                            f"renewal_communion_"
+                            f"{child.get('child_id')}"
+                        ),
+                    )
+                )
+
+                communion_received_for_history = (
+                    communion_history_answer
+                    == "Yes"
+                )
+
+        else:
+
+            communion_received_for_history = (
+                communion_recorded
+            )
+
+        # -------------------------------------------------
+        # Prior-year completion questions
+        # -------------------------------------------------
+
+        if completion_questions:
+
+            st.markdown(
+                "**Last year's sacrament preparation**"
+            )
+
+            st.caption(
+                "Our records show that this child was "
+                "preparing for the following sacrament or "
+                "sacraments last year. Please let us know "
+                "whether they were received."
+            )
+
+            for sacrament_name in (
+                completion_questions
+            ):
+
+                existing_answer = (
+                    child.get(
+                        "sacrament_completion_answers",
+                        {},
+                    ).get(
+                        sacrament_name
+                    )
+                )
+
+                answer_options = [
+                    "Select one",
+                    "Yes",
+                    "No",
+                ]
+
+                if existing_answer in (
+                    "Yes",
+                    "No",
+                ):
+
+                    answer_index = (
+                        answer_options.index(
+                            existing_answer
+                        )
+                    )
+
+                else:
+
+                    answer_index = 0
+
+                completion_answers[
+                    sacrament_name
+                ] = st.selectbox(
+                    (
+                        f"Did {first_name} receive "
+                        f"{sacrament_name} last year?"
+                    ),
+                    answer_options,
+                    index=answer_index,
+                    key=(
+                        f"renewal_completion_"
+                        f"{child.get('child_id')}_"
+                        f"{sacrament_name}"
+                    ),
+                )
+
+        # -------------------------------------------------
+        # Determine history after prior-year answers
+        # -------------------------------------------------
+
+        reconciliation_received_for_history = (
+            reconciliation_received_for_history
+            or completion_answers.get(
+                "First Reconciliation"
+            )
+            == "Yes"
+        )
+
+        communion_received_for_history = (
+            communion_received_for_history
+            or completion_answers.get(
+                "First Communion"
+            )
+            == "Yes"
+        )
+
+        prerequisites_for_confirmation = (
+            baptism_received_for_history
+            and reconciliation_received_for_history
+            and communion_received_for_history
+        )
+
+        # -------------------------------------------------
+        # Confirmation
+        # -------------------------------------------------
+
+        if prerequisites_for_confirmation:
+
+            if confirmation_recorded:
+
+                confirmation_received_for_history = True
+
+            elif (
+                "Confirmation"
+                in completion_questions
+            ):
+
+                confirmation_received_for_history = (
+                    completion_answers.get(
+                        "Confirmation"
+                    )
+                    == "Yes"
+                )
+
+            else:
+
+                existing_confirmation_answer = (
+                    child.get(
+                        "confirmation_history_answer"
+                    )
+                )
+
+                confirmation_index = (
+                    history_options.index(
+                        existing_confirmation_answer
+                    )
+                    if existing_confirmation_answer
+                    in history_options
+                    else 0
+                )
+
+                confirmation_history_answer = (
+                    st.selectbox(
+                        (
+                            f"Has {first_name} received "
+                            "Confirmation?"
+                        ),
+                        history_options,
+                        index=confirmation_index,
+                        key=(
+                            f"renewal_confirmation_history_"
+                            f"{child.get('child_id')}"
+                        ),
+                    )
+                )
+
+                confirmation_received_for_history = (
+                    confirmation_history_answer
+                    == "Yes"
+                )
+
+        else:
+
+            confirmation_received_for_history = (
+                confirmation_recorded
+            )
+
+        # -------------------------------------------------
+        # New-year sacrament preparation
+        # -------------------------------------------------
+
+        baptism_received = (
+            baptism_received_for_history
+        )
+
+        first_reconciliation_received = (
+            reconciliation_received_for_history
+        )
+
+        first_communion_received = (
+            communion_received_for_history
+        )
+
+        confirmation_received = (
+            confirmation_received_for_history
+        )
+
+        show_fcr_prep = (
+            baptism_received
+            and not (
+                first_reconciliation_received
+                and first_communion_received
+            )
+        )
+
+        show_confirmation_prep = (
+            baptism_received
+            and first_reconciliation_received
+            and first_communion_received
+            and not confirmation_received
+        )
+
+        if (
+            show_fcr_prep
+            or show_confirmation_prep
+        ):
+
+            st.divider()
+
+            st.subheader(
+                "Sacrament Preparation for "
+                f"{st.session_state.renewal_data.get('active_year', {}).get('name', 'the new year')}"
+            )
+
+            st.caption(
+                "Select any sacraments this child will be "
+                "preparing to receive during the new Faith "
+                "Formation year."
+            )
+
+        if show_fcr_prep:
+
+            receiving_first_communion_reconciliation = (
+                st.toggle(
+                    "Preparing for First Reconciliation / "
+                    "First Communion",
+                    value=child.get(
+                        "receiving_first_communion_reconciliation",
+                        False,
+                    ),
+                    key=(
+                        f"renewal_fcr_prep_"
+                        f"{child.get('child_id')}"
+                    ),
+                )
+            )
+
+        else:
+
+            receiving_first_communion_reconciliation = (
+                False
+            )
+
+        if show_confirmation_prep:
+
+            receiving_confirmation = (
+                st.toggle(
+                    "Preparing for Confirmation",
+                    value=child.get(
+                        "receiving_confirmation",
+                        False,
+                    ),
+                    key=(
+                        f"renewal_confirmation_prep_"
+                        f"{child.get('child_id')}"
+                    ),
+                )
+            )
+
+        else:
+
+            receiving_confirmation = (
+                False
+            )
+
+    else:
+
+        receiving_first_communion_reconciliation = (
+            child.get(
+                "receiving_first_communion_reconciliation",
+                False,
+            )
+        )
+
+        receiving_confirmation = (
+            child.get(
+                "receiving_confirmation",
+                False,
+            )
+        )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Save draft
+    # -----------------------------------------------------
+
+    if st.button(
+        "Save Child",
+        type="primary",
+        use_container_width=True,
+    ):
+
+        if not first_name.strip():
+
+            st.error(
+                "Please enter the child's first name."
+            )
+            return
+
+        if not last_name.strip():
+
+            st.error(
+                "Please enter the child's last name."
+            )
+            return
+
+        if date_of_birth is None:
+
+            st.error(
+                "Please enter the child's date of birth."
+            )
+            return
+
+        if renew_for_active_year:
+
+            if grade == "Select grade":
+
+                st.error(
+                    "Please select the child's grade "
+                    "for the new school year."
+                )
+                return
+
+            if not school.strip():
+
+                st.error(
+                    "Please enter the child's school "
+                    "for the new school year."
+                )
+                return
+
+            history_answers_to_validate = [
+                (
+                    "Baptism",
+                    baptism_history_answer,
+                ),
+                (
+                    "First Reconciliation",
+                    reconciliation_history_answer,
+                ),
+                (
+                    "First Communion",
+                    communion_history_answer,
+                ),
+                (
+                    "Confirmation",
+                    confirmation_history_answer,
+                ),
+            ]
+
+            for (
+                sacrament_name,
+                answer,
+            ) in history_answers_to_validate:
+
+                if answer == "Select one":
+
+                    st.error(
+                        "Please tell us whether "
+                        f"{first_name.strip()} has received "
+                        f"{sacrament_name}."
+                    )
+                    return
+
+            for (
+                sacrament_name,
+                answer,
+            ) in completion_answers.items():
+
+                if answer == "Select one":
+
+                    st.error(
+                        "Please tell us whether "
+                        f"{first_name.strip()} received "
+                        f"{sacrament_name} last year."
+                    )
+                    return
+
+        child["first_name"] = (
+            first_name.strip()
+        )
+
+        child["middle_name"] = (
+            middle_name.strip()
+        )
+
+        child["last_name"] = (
+            last_name.strip()
+        )
+
+        child["date_of_birth"] = (
+            date_of_birth
+        )
+
+        child["grade"] = (
+            grade
+        )
+
+        child["school"] = (
+            school.strip()
+            if isinstance(
+                school,
+                str,
+            )
+            else school
+        )
+
+        child[
+            "renew_for_active_year"
+        ] = renew_for_active_year
+
+        child[
+            "receiving_first_communion_reconciliation"
+        ] = (
+            receiving_first_communion_reconciliation
+        )
+
+        child[
+            "receiving_confirmation"
+        ] = (
+            receiving_confirmation
+        )
+
+        child[
+            "baptism_history_answer"
+        ] = baptism_history_answer
+
+        child[
+            "reconciliation_history_answer"
+        ] = reconciliation_history_answer
+
+        child[
+            "communion_history_answer"
+        ] = communion_history_answer
+
+        child[
+            "confirmation_history_answer"
+        ] = confirmation_history_answer
+
+        child[
+            "sacrament_completion_answers"
+        ] = completion_answers
+
+        # ---------------------------------------------
+        # Build additive sacramental-history updates
+        # ---------------------------------------------
+
+        sacraments_to_record = []
+
+        history_answer_map = [
+            (
+                "Baptism",
+                baptism_history_answer,
+            ),
+            (
+                "First Reconciliation",
+                reconciliation_history_answer,
+            ),
+            (
+                "First Communion",
+                communion_history_answer,
+            ),
+            (
+                "Confirmation",
+                confirmation_history_answer,
+            ),
+        ]
+
+        for (
+            sacrament_name,
+            answer,
+        ) in history_answer_map:
+
+            if answer == "Yes":
+
+                sacraments_to_record.append(
+                    {
+                        "sacrament":
+                            sacrament_name,
+                    }
+                )
+
+        for (
+            sacrament_name,
+            answer,
+        ) in completion_answers.items():
+
+            if (
+                answer == "Yes"
+                and not any(
+                    item.get(
+                        "sacrament"
+                    )
+                    == sacrament_name
+                    for item
+                    in sacraments_to_record
+                )
+            ):
+
+                sacraments_to_record.append(
+                    {
+                        "sacrament":
+                            sacrament_name,
+                    }
+                )
+
+        child[
+            "sacraments_to_record"
+        ] = sacraments_to_record
+
+        child[
+            "renewal_reviewed"
+        ] = True
+
+        st.session_state.children[
+            child_index
+        ] = child
 
         st.rerun()
 
@@ -5106,6 +7513,19 @@ def review_dialog():
                         "First Communion",
                         child[
                             "first_communion_status"
+                        ],
+                    )
+                )
+
+            if child.get(
+                "confirmation_status"
+            ):
+
+                history_parts.append(
+                    (
+                        "Confirmation",
+                        child[
+                            "confirmation_status"
                         ],
                     )
                 )
@@ -5697,6 +8117,52 @@ if (
             clear_admin_child_detail()
 
             st.rerun()
+
+    # -----------------------------------------------------
+    # Catechetical year management
+    # -----------------------------------------------------
+
+    try:
+
+        rollover_state = (
+            get_rollover_state()
+        )
+
+    except Exception:
+
+        st.error(
+            "We couldn't load the catechetical year information."
+        )
+
+        st.stop()
+
+    # -----------------------------------------------------
+    # Active catechetical year
+    # -----------------------------------------------------
+
+    rollover_result = (
+        st.session_state.pop(
+            "rollover_result",
+            None,
+        )
+    )
+
+    if rollover_result:
+
+        st.success(
+            f"{rollover_result['new_name']} is now the "
+            "active catechetical year. "
+            f"{rollover_result['previous_name']} was "
+            "closed, returning-household renewals are "
+            "open, and "
+            f"{rollover_result['classes_copied']} "
+            "class configurations were carried forward."
+        )
+
+    st.caption(
+        "Catechetical Year - "
+        f"{rollover_state['current_name']} "
+    )
 
     try:
 
@@ -6479,6 +8945,509 @@ if (
                 "No registrations match your search."
             )
 
+    st.divider()
+
+    # -----------------------------------------------------
+    # Administration
+    # -----------------------------------------------------
+
+    st.header(
+        "Administration"
+    )
+
+    st.caption(
+        "System settings and annual registration management."
+    )
+
+    with st.expander(
+        "Catechetical Year Management",
+        expanded=False,
+    ):
+
+        st.caption(
+            "Manage the annual transition between "
+            "Faith Formation years."
+        )
+
+        year_col, renewal_col, next_col = (
+            st.columns(3)
+        )
+
+        with year_col:
+
+            st.metric(
+                "Active Year",
+                rollover_state[
+                    "current_name"
+                ],
+            )
+
+        with renewal_col:
+
+            renewal_status = (
+                "Open"
+                if rollover_state[
+                    "renewal_open"
+                ]
+                else "Closed"
+            )
+
+            st.metric(
+                "Returning Household Renewals",
+                renewal_status,
+            )
+
+        with next_col:
+
+            st.metric(
+                "Next Year",
+                rollover_state[
+                    "next_name"
+                ],
+            )
+
+        st.caption(
+            "Beginning a new catechetical year closes "
+            "the current year, carries class configuration "
+            "forward, and opens returning-household renewal. "
+            "Students are not automatically re-enrolled."
+        )
+
+        if st.button(
+            f"Begin {rollover_state['next_name']}",
+            type="secondary",
+            help=(
+                "Close the current catechetical year and "
+                "prepare the next year for registration."
+            ),
+            key="begin_catechetical_year",
+        ):
+
+            st.session_state.show_rollover_dialog = True
+
+        if (
+            st.session_state.show_rollover_dialog
+        ):
+
+            catechetical_year_rollover_dialog(
+                rollover_state
+            )
+
+    # -----------------------------------------------------
+    # Renewal invitations
+    # -----------------------------------------------------
+
+    with st.expander(
+        "Renewal Invitations",
+        expanded=False,
+    ):
+
+        invitation_state = (
+            get_renewal_invitation_state()
+        )
+
+        active_invitation_year = (
+            invitation_state["active_year"]
+        )
+
+        previous_invitation_year = (
+            invitation_state["previous_year"]
+        )
+
+        st.caption(
+            "Invite eligible returning households to "
+            "renew their Faith Formation registration."
+        )
+
+        if (
+            active_invitation_year is None
+            or previous_invitation_year is None
+        ):
+
+            st.info(
+                "Renewal invitations are not available "
+                "until there is both an active year and "
+                "an immediately preceding catechetical year."
+            )
+
+        elif not active_invitation_year[
+            "renewal_open"
+        ]:
+
+            st.info(
+                "Returning-household renewal is currently "
+                "closed for "
+                f"{active_invitation_year['name']}."
+            )
+
+        else:
+
+            invite_year_col, eligible_col = (
+                st.columns(2)
+            )
+
+            with invite_year_col:
+
+                st.metric(
+                    "Renewal Year",
+                    active_invitation_year[
+                        "name"
+                    ],
+                )
+
+            with eligible_col:
+
+                st.metric(
+                    "Eligible Households",
+                    invitation_state[
+                        "eligible_household_count"
+                    ],
+                )
+
+            st.caption(
+                "Eligible households participated in "
+                f"{previous_invitation_year['name']} and "
+                "have at least one child who can advance "
+                "to the next grade. Households whose only "
+                "students completed 12th grade are excluded."
+            )
+
+            existing_batch = (
+                invitation_state["batch"]
+            )
+
+            if existing_batch is None:
+
+                st.info(
+                    "The initial renewal invitation campaign "
+                    "has not been created for this year."
+                )
+
+                st.caption(
+                    "Creating the campaign prepares one "
+                    "invitation for each eligible household. "
+                    "No email is sent until the campaign is "
+                    "started."
+                )
+
+                if st.button(
+                    "Prepare Renewal Invitations",
+                    type="secondary",
+                    key=(
+                        "prepare_renewal_invitations"
+                    ),
+                ):
+
+                    try:
+                        create_renewal_invitation_batch(
+                            created_by=(
+                                st.session_state[
+                                    "admin_email"
+                                ]
+                            ),
+                        )
+
+                    except Exception as exc:
+                        st.error(
+                            "The renewal invitation campaign "
+                            "could not be prepared. "
+                            f"{exc}"
+                        )
+
+                    else:
+                        st.rerun()
+
+            else:
+
+                batch_status = (
+                    get_renewal_invitation_batch_status(
+                        batch_id=existing_batch[
+                            "batch_id"
+                        ],
+                    )
+                )
+
+                st.markdown(
+                    "**Invitation Campaign**"
+                )
+
+                (
+                    pending_col,
+                    sent_col,
+                    failed_col,
+                    sending_col,
+                ) = st.columns(4)
+
+                with pending_col:
+                    st.metric(
+                        "Pending",
+                        batch_status["pending"],
+                    )
+
+                with sent_col:
+                    st.metric(
+                        "Sent",
+                        batch_status["sent"],
+                    )
+
+                with failed_col:
+                    st.metric(
+                        "Failed",
+                        batch_status["failed"],
+                    )
+
+                with sending_col:
+                    st.metric(
+                        "Sending",
+                        batch_status["sending"],
+                    )
+
+                st.caption(
+                    "Campaign prepared by "
+                    f"{batch_status['created_by']} · "
+                    f"{batch_status['household_count']} "
+                    "households"
+                )
+
+                if batch_status["sending"] > 0:
+
+                    sending_count = batch_status["sending"]
+
+                    st.warning(
+                        f"{sending_count} invitation"
+                        f"{'' if sending_count == 1 else 's'} "
+                        f"{'is' if sending_count == 1 else 'are'} "
+                        "still marked as sending. Additional "
+                        "delivery is paused until "
+                        f"{'this record is' if sending_count == 1 else 'these records are'} "
+                        "reviewed."
+                    )
+
+                    if st.button(
+                        (
+                            f"Review {sending_count} Sending "
+                            f"Invitation"
+                            f"{'' if sending_count == 1 else 's'}"
+                        ),
+                        key="review_sending_renewal_invitations",
+                        use_container_width=True,
+                    ):
+
+                        st.session_state[
+                            "show_renewal_invitation_sending_dialog"
+                        ] = True
+
+                        st.rerun()
+
+                elif (
+                    batch_status["pending"] == 0
+                    and batch_status["failed"] == 0
+                ):
+
+                    st.success(
+                        f"All {batch_status['sent']} renewal "
+                        f"invitation"
+                        f"{'' if batch_status['sent'] == 1 else 's'} "
+                        "in this campaign have been sent."
+                    )
+
+                elif (
+                    batch_status["pending"] > 0
+                    and batch_status["failed"] > 0
+                ):
+
+                    st.divider()
+
+                    pending_col, failed_col = st.columns(2)
+
+                    with pending_col:
+
+                        st.markdown(
+                            "#### Pending Invitations"
+                        )
+
+                        st.write(
+                            f"**{batch_status['pending']} "
+                            f"invitation"
+                            f"{'' if batch_status['pending'] == 1 else 's'} "
+                            "waiting to send**"
+                        )
+
+                        st.markdown(
+                            """
+<div style="min-height: 52px; font-size: 0.875rem; opacity: 0.75;">
+These invitations have not been attempted yet.
+</div>
+""",
+                            unsafe_allow_html=True,
+                        )
+
+                        if st.button(
+                            (
+                                f"Stage "
+                                f"{batch_status['pending']} "
+                                f"Invitation"
+                                f"{'' if batch_status['pending'] == 1 else 's'}"
+                            ),
+                            type="primary",
+                            key="send_renewal_invitations",
+                            use_container_width=True,
+                        ):
+
+                            st.session_state[
+                                "show_renewal_invitation_send_dialog"
+                            ] = True
+
+                            st.rerun()
+
+                    with failed_col:
+
+                        st.markdown(
+                            "#### Failed Invitations"
+                        )
+
+                        st.write(
+                            f"**{batch_status['failed']} "
+                            f"invitation"
+                            f"{'' if batch_status['failed'] == 1 else 's'} "
+                            f"{'needs' if batch_status['failed'] == 1 else 'need'} "
+                            "attention**"
+                        )
+
+                        st.markdown(
+                            """
+<div style="min-height: 52px; font-size: 0.875rem; opacity: 0.75;">
+These invitations failed during a previous delivery attempt.
+</div>
+""",
+                            unsafe_allow_html=True,
+                        )
+
+                        if st.button(
+                            (
+                                f"Stage Retry for "
+                                f"{batch_status['failed']} "
+                                f"Invitation"
+                                f"{'' if batch_status['failed'] == 1 else 's'}"
+                            ),
+                            type="secondary",
+                            key=(
+                                "retry_failed_"
+                                "renewal_invitations"
+                            ),
+                            use_container_width=True,
+                        ):
+
+                            st.session_state[
+                                "show_renewal_invitation_retry_dialog"
+                            ] = True
+
+                            st.rerun()
+
+                elif batch_status["pending"] > 0:
+
+                    if batch_status["sent"] > 0:
+
+                        st.info(
+                            f"{batch_status['sent']} renewal "
+                            f"invitation"
+                            f"{'' if batch_status['sent'] == 1 else 's'} "
+                            f"{'has' if batch_status['sent'] == 1 else 'have'} "
+                            "been sent successfully. "
+                            f"{batch_status['pending']} "
+                            f"invitation"
+                            f"{'' if batch_status['pending'] == 1 else 's'} "
+                            f"{'remains' if batch_status['pending'] == 1 else 'remain'} "
+                            "ready to send."
+                        )
+
+                    else:
+
+                        st.info(
+                            "This campaign is prepared and ready "
+                            "to send. No invitations from this "
+                            "campaign have been sent yet."
+                        )
+
+                    if st.button(
+                        (
+                            f"Stage "
+                            f"{batch_status['pending']} "
+                            f"Renewal Invitation"
+                            f"{'' if batch_status['pending'] == 1 else 's'}"
+                        ),
+                        type="primary",
+                        key="send_renewal_invitations",
+                    ):
+
+                        st.session_state[
+                            "show_renewal_invitation_send_dialog"
+                        ] = True
+
+                        st.rerun()
+
+                elif batch_status["failed"] > 0:
+
+                    st.warning(
+                        f"{batch_status['failed']} invitation"
+                        + (
+                            " has"
+                            if batch_status["failed"] == 1
+                            else "s have"
+                        )
+                        + " failed and can be retried."
+                    )
+
+                    if st.button(
+                        (
+                            f"Stage Retry for "
+                            f"{batch_status['failed']} "
+                            f"Failed Invitation"
+                            f"{'' if batch_status['failed'] == 1 else 's'}"
+                        ),
+                        type="secondary",
+                        key=(
+                            "retry_failed_"
+                            "renewal_invitations"
+                        ),
+                    ):
+
+                        st.session_state[
+                            "show_renewal_invitation_retry_dialog"
+                        ] = True
+
+                        st.rerun()
+
+                if (
+                    st.session_state[
+                        "show_renewal_invitation_send_dialog"
+                    ]
+                ):
+
+                    renewal_invitation_send_dialog(
+                        batch_status
+                    )
+
+                if (
+                    st.session_state[
+                        "show_renewal_invitation_retry_dialog"
+                    ]
+                ):
+
+                    renewal_invitation_retry_dialog(
+                        batch_status
+                    )
+
+                if (
+                    st.session_state[
+                        "show_renewal_invitation_sending_dialog"
+                    ]
+                ):
+
+                    renewal_invitation_sending_dialog(
+                        batch_status
+                    )
+
     if (
         st.session_state.admin_detail_child_id
         is not None
@@ -6795,6 +9764,761 @@ if (
         ),
         unsafe_allow_html=True,
     )
+
+    st.stop()
+
+# ---------------------------------------------------------
+# Renewal landing screen
+# ---------------------------------------------------------
+
+if (
+    st.session_state.registration_mode
+    == "renewal"
+):
+
+    renewal_data = (
+        st.session_state.renewal_data
+    )
+
+    if not renewal_data:
+
+        st.error(
+            "We couldn't load your renewal information. "
+            "Please return to the beginning and try again."
+        )
+
+        if st.button(
+            "Return to Registration",
+            use_container_width=True,
+        ):
+
+            reset_public_registration_state()
+            st.session_state.renewal_data = None
+            st.rerun()
+
+        st.stop()
+
+    # -----------------------------------------------------
+    # Successful renewal submission
+    # -----------------------------------------------------
+
+    renewal_submission_result = (
+        st.session_state.get(
+            "renewal_submission_result"
+        )
+    )
+
+    if renewal_submission_result:
+
+        submitted_year_name = (
+            renewal_submission_result.get(
+                "year"
+            )
+            or renewal_data.get(
+                "active_year",
+                {}
+            ).get(
+                "name",
+                "the new Faith Formation year",
+            )
+        )
+
+        if LOGO_PATH.exists():
+
+            logo_url = (
+                image_to_data_url(
+                    LOGO_PATH
+                )
+            )
+
+            st.markdown(
+                f"""
+                <div class="landing-logo">
+                    <img
+                        src="{logo_url}"
+                        alt="Ascension Catholic Church"
+                    >
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        st.markdown(
+            """
+            <div class="landing-parish">
+                Ascension Catholic Church
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        st.title(
+            "Renewal Complete"
+        )
+
+        st.success(
+            f"Your family's Faith Formation registration "
+            f"for {submitted_year_name} has been submitted."
+        )
+
+        st.write(
+            "Thank you for taking a few moments to review "
+            "and update your family's information."
+        )
+
+        st.caption(
+            "Your registration has been received by "
+            "Ascension Catholic Church."
+        )
+
+        if st.button(
+            "Return to Registration",
+            use_container_width=True,
+        ):
+
+            reset_public_registration_state()
+
+            st.session_state.renewal_data = None
+
+            st.session_state.pop(
+                "renewal_submission_result",
+                None,
+            )
+
+            st.rerun()
+
+        st.stop()
+
+    active_year = (
+        renewal_data.get(
+            "active_year",
+            {}
+        )
+    )
+
+    household = (
+        renewal_data.get(
+            "household",
+            {}
+        )
+    )
+
+    children = (
+        st.session_state.children
+        or []
+    )
+
+    year_name = (
+        active_year.get(
+            "name",
+            "the upcoming catechetical year",
+        )
+    )
+
+    parent_name = (
+        household.get(
+            "parent_a_first_name",
+            ""
+        )
+        or ""
+    ).strip()
+
+    # -----------------------------------------------------
+    # Header
+    # -----------------------------------------------------
+
+    if LOGO_PATH.exists():
+
+        logo_url = (
+            image_to_data_url(
+                LOGO_PATH
+            )
+        )
+
+        st.markdown(
+            f"""
+            <div class="landing-logo">
+                <img
+                    src="{logo_url}"
+                    alt="Ascension Catholic Church"
+                >
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        """
+        <div class="landing-parish">
+            Ascension Catholic Church
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.title(
+        f"Renew for {year_name}"
+    )
+
+    if parent_name:
+
+        st.write(
+            f"Welcome back, **{parent_name}**! "
+            "Let's review your family's information "
+            "for the new Faith Formation year."
+        )
+
+    else:
+
+        st.write(
+            "Welcome back! Let's review your family's "
+            "information for the new Faith Formation year."
+        )
+
+    st.caption(
+        "Nothing will be submitted until you review "
+        "and confirm your family's information."
+    )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Household review
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Household Information"
+    )
+
+    current_household = (
+        st.session_state.household
+        or {}
+    )
+
+    parent_a_name = " ".join(
+        part
+        for part in [
+            current_household.get(
+                "parent_a_first_name",
+                "",
+            ),
+            current_household.get(
+                "parent_a_last_name",
+                "",
+            ),
+        ]
+        if part
+    )
+
+    address_line_1 = (
+        current_household.get(
+            "address_line_1",
+            "",
+        )
+        or ""
+    )
+
+    city = (
+        current_household.get(
+            "city",
+            "",
+        )
+        or ""
+    )
+
+    state = (
+        current_household.get(
+            "state",
+            "",
+        )
+        or ""
+    )
+
+    zip_code = (
+        current_household.get(
+            "zip_code",
+            "",
+        )
+        or ""
+    )
+
+    with st.container(
+        border=True,
+    ):
+
+        if parent_a_name:
+
+            st.write(
+                f"**{parent_a_name}**"
+            )
+
+        st.write(
+            current_household.get(
+                "parent_a_email",
+                "",
+            )
+        )
+
+        st.write(
+            current_household.get(
+                "parent_a_phone",
+                "",
+            )
+        )
+
+        if address_line_1:
+
+            st.write(
+                address_line_1
+            )
+
+        st.write(
+            f"{city}, {state} {zip_code}".strip()
+        )
+
+        if st.button(
+            "Review / Edit Household Information",
+            use_container_width=True,
+        ):
+
+            household_dialog()
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Children available for renewal
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Your Children"
+    )
+
+    if not children:
+
+        st.info(
+            "We couldn't find any children from a prior "
+            "Faith Formation registration."
+        )
+
+    for child_index, child in enumerate(
+        children
+    ):
+
+        first_name = (
+            child.get(
+                "first_name",
+                ""
+            )
+            or ""
+        )
+
+        last_name = (
+            child.get(
+                "last_name",
+                ""
+            )
+            or ""
+        )
+
+        previous_grade = (
+            child.get(
+                "previous_grade"
+            )
+            or "—"
+        )
+
+        proposed_grade = (
+            child.get(
+                "grade"
+            )
+            or None
+        )
+
+        already_enrolled = bool(
+            child.get(
+                "already_enrolled",
+                False,
+            )
+        )
+
+        eligible = bool(
+            child.get(
+                "eligible_for_renewal",
+                False,
+            )
+        )
+
+        renew_for_active_year = bool(
+            child.get(
+                "renew_for_active_year",
+                False,
+            )
+        )
+
+        renewal_reviewed = bool(
+            child.get(
+                "renewal_reviewed",
+                False,
+            )
+        )
+
+        with st.container(
+            border=True,
+        ):
+
+            st.markdown(
+                f"### {first_name} {last_name}"
+            )
+
+            if proposed_grade:
+
+                st.write(
+                    f"**Grade:** "
+                    f"{previous_grade} → {proposed_grade}"
+                )
+
+            else:
+
+                st.write(
+                    f"**Previous Grade:** "
+                    f"{previous_grade}"
+                )
+
+            if already_enrolled:
+
+                st.success(
+                    f"Already registered for {year_name}"
+                )
+
+            elif (
+                eligible
+                and not renewal_reviewed
+            ):
+
+                st.info(
+                    f"Eligible for renewal for {year_name}"
+                )
+
+            elif (
+                eligible
+                and renewal_reviewed
+                and renew_for_active_year
+            ):
+
+                st.success(
+                    f"Ready for renewal for {year_name}"
+                )
+
+            elif (
+                eligible
+                and renewal_reviewed
+                and not renew_for_active_year
+            ):
+
+                st.warning(
+                    f"Not being registered for {year_name}"
+                )
+
+            else:
+
+                st.warning(
+                    "This student is not currently eligible "
+                    "for automatic renewal."
+                )
+
+            if st.button(
+                "Review / Edit Child",
+                key=(
+                    f"renewal_edit_child_"
+                    f"{child.get('child_id', child_index)}"
+                ),
+                use_container_width=True,
+            ):
+
+                renewal_child_dialog(
+                    child_index
+                )
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Review renewal
+    # -----------------------------------------------------
+
+    st.subheader(
+        "Review Renewal"
+    )
+
+    renewal_children = (
+        st.session_state.children
+        or []
+    )
+
+    children_needing_review = [
+        child
+        for child in renewal_children
+        if (
+            child.get(
+                "eligible_for_renewal",
+                False,
+            )
+            and not child.get(
+                "already_enrolled",
+                False,
+            )
+            and not child.get(
+                "renewal_reviewed",
+                False,
+            )
+        )
+    ]
+
+    children_to_renew = [
+        child
+        for child in renewal_children
+        if (
+            child.get(
+                "renew_for_active_year",
+                False,
+            )
+            and child.get(
+                "renewal_reviewed",
+                False,
+            )
+            and not child.get(
+                "already_enrolled",
+                False,
+            )
+        )
+    ]
+
+    if children_needing_review:
+
+        st.info(
+            "Please review each eligible child before "
+            "continuing with your renewal."
+        )
+
+        st.caption(
+            f"{len(children_needing_review)} "
+            f"{'child still needs' if len(children_needing_review) == 1 else 'children still need'} "
+            "to be reviewed."
+        )
+
+    elif not children_to_renew:
+
+        st.warning(
+            f"No children are currently selected for "
+            f"registration for {year_name}."
+        )
+
+        st.caption(
+            "Review a child above and choose to register "
+            "them for the new Faith Formation year before "
+            "continuing."
+        )
+
+    else:
+
+        st.success(
+            "Your renewal is ready to review."
+        )
+
+        st.caption(
+            "Please check the information below before "
+            "submitting your registration."
+        )
+
+        for child in children_to_renew:
+
+            child_name = " ".join(
+                part
+                for part in [
+                    child.get(
+                        "first_name",
+                        "",
+                    ),
+                    child.get(
+                        "middle_name",
+                        "",
+                    ),
+                    child.get(
+                        "last_name",
+                        "",
+                    ),
+                ]
+                if part
+            )
+
+            child_grade = (
+                child.get(
+                    "grade",
+                    "",
+                )
+                or ""
+            )
+
+            child_school = (
+                child.get(
+                    "school",
+                    "",
+                )
+                or ""
+            )
+
+            sacraments_to_record = (
+                child.get(
+                    "sacraments_to_record",
+                    []
+                )
+                or []
+            )
+
+            with st.container(
+                border=True,
+            ):
+
+                st.markdown(
+                    f"### {child_name}"
+                )
+
+                st.write(
+                    f"**Grade:** {child_grade}"
+                )
+
+                st.write(
+                    f"**School:** {child_school}"
+                )
+
+                if sacraments_to_record:
+
+                    sacrament_names = [
+                        item.get(
+                            "sacrament",
+                            "",
+                        )
+                        for item
+                        in sacraments_to_record
+                        if item.get(
+                            "sacrament"
+                        )
+                    ]
+
+                    if sacrament_names:
+
+                        st.write(
+                            "**Sacramental history updates:** "
+                            + ", ".join(
+                                sacrament_names
+                            )
+                        )
+
+                if child.get(
+                    "receiving_first_communion_reconciliation",
+                    False,
+                ):
+
+                    st.write(
+                        "**Sacrament preparation:** "
+                        "First Reconciliation / "
+                        "First Communion"
+                    )
+
+                if child.get(
+                    "receiving_confirmation",
+                    False,
+                ):
+
+                    st.write(
+                        "**Sacrament preparation:** "
+                        "Confirmation"
+                    )
+
+                if not (
+                    child.get(
+                        "receiving_first_communion_reconciliation",
+                        False,
+                    )
+                    or child.get(
+                        "receiving_confirmation",
+                        False,
+                    )
+                ):
+
+                    st.caption(
+                        "No sacrament preparation selected "
+                        "for the new year."
+                    )
+
+        if st.button(
+            "Submit Renewal",
+            type="primary",
+            use_container_width=True,
+        ):
+
+            household_reference = (
+                st.session_state.existing_household_reference
+                or ""
+            )
+
+            submission_household = dict(
+                current_household
+            )
+
+            submission_children = [
+                dict(child)
+                for child in children_to_renew
+            ]
+
+            try:
+
+                result = (
+                    submit_household_renewal(
+                        household_reference=(
+                            household_reference
+                        ),
+                        household=(
+                            submission_household
+                        ),
+                        children=(
+                            submission_children
+                        ),
+                    )
+                )
+
+            except Exception as exc:
+
+                st.error(
+                    "We couldn't complete your renewal. "
+                    "No changes were submitted."
+                )
+
+                st.caption(
+                    str(exc)
+                )
+
+            else:
+
+                st.session_state[
+                    "renewal_submission_result"
+                ] = result
+
+                st.rerun()
+
+    st.divider()
+
+    # -----------------------------------------------------
+    # Temporary navigation
+    # -----------------------------------------------------
+
+    if st.button(
+        "Return to Registration",
+        use_container_width=True,
+    ):
+
+        reset_public_registration_state()
+        st.session_state.renewal_data = None
+        st.rerun()
 
     st.stop()
 

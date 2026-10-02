@@ -450,6 +450,96 @@ no action is needed.
         html_body=html_body,
     )
 
+def send_rollover_verification_email(
+    recipient: str,
+    verification_code: str,
+    current_year: str,
+    next_year: str,
+    expires_minutes: int = 10,
+) -> None:
+    """
+    Send a one-time verification code before an
+    administrator starts a new catechetical year.
+    """
+
+    subject = (
+        f"Verify start of {next_year}"
+    )
+
+    body = f"""
+Hello,
+
+A request was made to close the {current_year}
+catechetical year and begin {next_year} in the
+Ascension Registration system.
+
+Your verification code is:
+
+{verification_code}
+
+This code will expire in {expires_minutes} minutes.
+
+Entering this code will authorize the final step before
+the new catechetical year is started.
+
+If you did not request this change, no action is needed.
+
+{_compact_footer_plain()}
+""".strip()
+
+    content_html = f"""
+        <p style="margin-top: 0;">Hello,</p>
+
+        <p>
+            A request was made to close the
+            <strong>{_safe(current_year)}</strong>
+            catechetical year and begin
+            <strong>{_safe(next_year)}</strong>
+            in the Ascension Registration system.
+        </p>
+
+        <p style="
+            margin-bottom: 6px;
+            font-weight: 700;
+            color: #203A5C;
+        ">
+            Your verification code:
+        </p>
+
+        {_verification_code_html(verification_code)}
+
+        <p style="
+            margin-top: 0;
+            font-size: 14px;
+            color: #626A72;
+        ">
+            This code will expire in
+            {_safe(expires_minutes)} minutes.
+        </p>
+
+        <p>
+            Entering this code will authorize the final
+            step before the new catechetical year is
+            started.
+        </p>
+
+        <p>
+            If you did not request this change,
+            no action is needed.
+        </p>
+    """
+
+    html_body = _email_shell(
+        content_html,
+        _compact_footer_html(),
+    )
+
+    _send_email(
+        recipient=recipient,
+        subject=subject,
+        body=body,
+        html_body=html_body,
+    )
 
 # ---------------------------------------------------------
 # Household ID recovery email
@@ -790,6 +880,190 @@ the email address associated with your registration.
         <p>
             If you lose your Household ID, you can recover it
             using the email address associated with your registration.
+        </p>
+    """
+
+    html_body = _email_shell(
+        content_html,
+        _full_footer_html(),
+    )
+
+    _send_email(
+        recipient=recipient,
+        subject=subject,
+        body=body,
+        html_body=html_body,
+    )
+
+
+# ---------------------------------------------------------
+# Renewal invitation
+# ---------------------------------------------------------
+
+def send_renewal_invitation(
+    recipient: str,
+    parent_first_name: str,
+    household_reference: str,
+    previous_year_name: str,
+    active_year_name: str,
+) -> None:
+    """
+    Send a returning household its annual Faith Formation
+    registration renewal invitation.
+    """
+
+    recipient = (
+        recipient
+        or ""
+    ).strip()
+
+    parent_first_name = (
+        parent_first_name
+        or ""
+    ).strip()
+
+    household_reference = (
+        household_reference
+        or ""
+    ).strip().upper()
+
+    previous_year_name = (
+        previous_year_name
+        or ""
+    ).strip()
+
+    active_year_name = (
+        active_year_name
+        or ""
+    ).strip()
+
+    if not recipient:
+        raise ValueError(
+            "A recipient email address is required."
+        )
+
+    if not household_reference:
+        raise ValueError(
+            "A Household ID is required."
+        )
+
+    greeting = (
+        f"Hello {parent_first_name},"
+        if parent_first_name
+        else "Hello,"
+    )
+
+    subject = (
+        f"Faith Formation renewal is open "
+        f"for {active_year_name}"
+    )
+
+    body = f"""
+{greeting}
+
+Registration renewal is now open for returning
+Ascension Faith Formation families.
+
+Your household participated in our {previous_year_name}
+Faith Formation year, and you can now review and renew
+your family's registration for {active_year_name}.
+
+Your Household ID:
+
+{household_reference}
+
+Visit the Ascension Faith Formation Registration site
+and choose "Returning Household."
+
+Enter your Household ID, and we will send a verification
+code to the email address associated with your household
+before allowing access to your registration.
+
+During renewal, you will be able to review your household
+information, update your children's information, and select
+which children will be returning this year.
+
+If your family will not be returning this year, no action
+is required.
+
+{_full_footer_plain()}
+""".strip()
+
+    content_html = f"""
+        <p style="
+            margin-top: 0;
+            font-size: 20px;
+            font-weight: 700;
+            color: #203A5C;
+        ">
+            Registration renewal is open
+        </p>
+
+        <p>
+            {_safe(greeting)}
+        </p>
+
+        <p>
+            Registration renewal is now open for returning
+            <strong>{_safe(PARISH_NAME)}</strong>
+            Faith Formation families.
+        </p>
+
+        <p>
+            Your household participated in our
+            <strong>{_safe(previous_year_name)}</strong>
+            Faith Formation year, and you can now review
+            and renew your family's registration for
+            <strong>{_safe(active_year_name)}</strong>.
+        </p>
+
+        <p style="
+            margin-bottom: 6px;
+            font-weight: 700;
+            color: #203A5C;
+        ">
+            Your Household ID
+        </p>
+
+        <div style="
+            margin: 14px 0 22px 0;
+            padding: 14px 18px;
+            background-color: #F6F2EA;
+            border: 1px solid #D8D0C5;
+            border-radius: 8px;
+            color: #203A5C;
+            font-size: 20px;
+            font-weight: 700;
+            letter-spacing: 0.04em;
+        ">
+            {_safe(household_reference)}
+        </div>
+
+        <p>
+            Visit the Ascension Faith Formation Registration
+            site and choose <strong>Returning Household</strong>.
+        </p>
+
+        <p>
+            Enter your Household ID, and we will send a
+            verification code to the email address associated
+            with your household before allowing access to
+            your registration.
+        </p>
+
+        <p>
+            During renewal, you will be able to review your
+            household information, update your children's
+            information, and select which children will be
+            returning this year.
+        </p>
+
+        <p style="
+            margin-bottom: 0;
+            color: #5E6873;
+        ">
+            If your family will not be returning this year,
+            no action is required.
         </p>
     """
 
